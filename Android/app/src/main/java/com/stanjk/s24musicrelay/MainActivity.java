@@ -61,6 +61,10 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         shizukuStatus.setTextSize(16);
         shizukuStatus.setPadding(0, 20, 0, 8);
 
+        Button forceSpeaker = new Button(this);
+        forceSpeaker.setText("Force source -> speaker");
+        forceSpeaker.setOnClickListener(v -> forceSourceToSpeaker());
+
         Button setZero = new Button(this);
         setZero.setText("Set source app 0");
         setZero.setOnClickListener(v -> setTestAppVolume(0));
@@ -136,6 +140,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
 
         root.addView(status);
         root.addView(shizukuStatus);
+        root.addView(forceSpeaker);
         root.addView(setZero);
         root.addView(setHundred);
         root.addView(speakerDelayLabel);
@@ -202,6 +207,37 @@ public final class MainActivity extends Activity implements CaptureService.Meter
                 shizukuStatus.setText("Shizuku: " + t.getClass().getSimpleName());
             }
         });
+    }
+
+    private void forceSourceToSpeaker() {
+        if (!Shizuku.pingBinder()
+                || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            ensureShizukuPermission();
+            return;
+        }
+
+        status.setText("Forcing UID " + TEST_UID + " -> speaker...");
+        new Thread(() -> {
+            try {
+                ShizukuAudioBridge.setAppDevice(
+                        TEST_UID,
+                        ShizukuAudioBridge.DEVICE_OUT_SPEAKER,
+                        false);
+                int actual = ShizukuAudioBridge.getAppDevice(TEST_UID);
+                runOnUiThread(() ->
+                        status.setText(
+                                "UID " + TEST_UID
+                                        + " forced speaker; route=0x"
+                                        + Integer.toHexString(actual)));
+            } catch (Throwable t) {
+                runOnUiThread(() ->
+                        status.setText(
+                                "Source route error: "
+                                        + t.getClass().getSimpleName()
+                                        + ": "
+                                        + t.getMessage()));
+            }
+        }, "Shizuku-Route").start();
     }
 
     private void setTestAppVolume(int ratio) {
