@@ -280,7 +280,10 @@ public final class NetworkSpeakerService extends Service {
                     }
 
                     publishSnapshot(localRing, localTrack, localReceiver);
-                    SystemClock.sleep(20);
+                    // Keep session prime timing tight relative to the 10 ms
+                    // transport grid; 20 ms polling allowed whole-packet
+                    // startup-delay jitter between calibration and playback.
+                    SystemClock.sleep(2);
                 }
                 if (!running) break;
 
