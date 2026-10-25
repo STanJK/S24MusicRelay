@@ -17,9 +17,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * One datagram carries exactly one 10 ms stereo LC3 frame:
  *   left[100 B] + right[100 B]
  *
- * Short packet loss is represented by LC3 PLC. Large outages are skipped and
- * the decoder is reset so a recovered live stream never accumulates historical
- * latency debt.
+ * Short packet loss is represented by LC3 PLC. Long missing runs preserve the
+ * source timeline with equal-duration silence, so recovery cannot permanently
+ * shift acoustic alignment.
  */
 final class UdpPcmReceiver implements AutoCloseable {
     static final int PORT = 32124;
@@ -207,6 +207,7 @@ final class UdpPcmReceiver implements AutoCloseable {
             nextSequence = packet.sequence;
             nextFrameId = packet.firstFrameId;
             pending.clear();
+            ring.clear();
             decoder.reset();
         }
 
