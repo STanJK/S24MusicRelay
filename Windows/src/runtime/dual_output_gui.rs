@@ -64,6 +64,8 @@ struct SharedControls {
     local_gain_bits: Arc<AtomicU32>,
     s24_delay_ms: Arc<AtomicU32>,
     local_delay_ms: Arc<AtomicU32>,
+    s24_muted: Arc<AtomicBool>,
+    local_muted: Arc<AtomicBool>,
 }
 
 impl SharedControls {
@@ -73,6 +75,8 @@ impl SharedControls {
             local_gain_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             s24_delay_ms: Arc::new(AtomicU32::new(0)),
             local_delay_ms: Arc::new(AtomicU32::new(0)),
+            s24_muted: Arc::new(AtomicBool::new(false)),
+            local_muted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -104,6 +108,22 @@ impl SharedControls {
     fn set_local_delay_ms(&self, value: u32) {
         self.local_delay_ms
             .store(value.min(MAX_DELAY_MS), Ordering::Relaxed);
+    }
+
+    fn s24_muted(&self) -> bool {
+        self.s24_muted.load(Ordering::Relaxed)
+    }
+
+    fn set_s24_muted(&self, value: bool) {
+        self.s24_muted.store(value, Ordering::Relaxed);
+    }
+
+    fn local_muted(&self) -> bool {
+        self.local_muted.load(Ordering::Relaxed)
+    }
+
+    fn set_local_muted(&self, value: bool) {
+        self.local_muted.store(value, Ordering::Relaxed);
     }
 
     fn request_stop(&self) {
@@ -408,6 +428,9 @@ fn run_local_render(
         let mut output =
             delay.process(&input, controls.local_delay_ms());
         apply_gain(&mut output, controls.local_gain());
+        if controls.local_muted() {
+            output.fill([0.0, 0.0]);
+        }
         sink.write_float_stereo(&output)
             .map_err(|error| format!("Realtek initial write failed: {error}"))?;
         stats.rendered_frames.fetch_add(
@@ -445,6 +468,9 @@ fn run_local_render(
         let mut output =
             delay.process(&input, controls.local_delay_ms());
         apply_gain(&mut output, controls.local_gain());
+        if controls.local_muted() {
+            output.fill([0.0, 0.0]);
+        }
 
         sink.write_float_stereo(&output)
             .map_err(|error| format!("Realtek write failed: {error}"))?;
@@ -579,8 +605,11 @@ fn run_dual_output(
                 &local_stats,
             );
 
-            let delayed =
+            let mut delayed =
                 s24_delay.process(&silence, controls.s24_delay_ms());
+            if controls.s24_muted() {
+                delayed.fill([0.0, 0.0]);
+            }
             let mut left_pcm = [0i16; LC3_FRAME_SAMPLES];
             let mut right_pcm = [0i16; LC3_FRAME_SAMPLES];
             for (index, frame) in delayed.iter().enumerate() {
@@ -664,8 +693,11 @@ fn run_dual_output(
                         &local_stats,
                     );
 
-                    let delayed =
+                    let mut delayed =
                         s24_delay.process(&pcm, controls.s24_delay_ms());
+                    if controls.s24_muted() {
+                        delayed.fill([0.0, 0.0]);
+                    }
                     let mut left_pcm = [0i16; LC3_FRAME_SAMPLES];
                     let mut right_pcm = [0i16; LC3_FRAME_SAMPLES];
 
@@ -716,7 +748,7 @@ fn run_dual_output(
                 let source_stats = source.stats();
                 let local = local_stats.snapshot();
                 println!(
-                    "[dual] packets={} bytes={} captured={} src_drop={} disc={} asm_reset={} | local_fifo={} local_underflow={} local_qdrop={} local_reset={} | gain={:.2} s24_delay={}ms local_delay={}ms",
+                    "[dual] packets={} bytes={} captured={} src_drop={} disc={} asm_reset={} | local_fifo={} local_underflow={} local_qdrop={} local_reset={} | gain={:.2} s24_delay={}ms local_delay={}ms s24_muted={} local_muted={}",
                     packets_sent,
                     bytes_sent,
                     source_stats.captured_frames,
@@ -730,6 +762,8 @@ fn run_dual_output(
                     controls.local_gain(),
                     controls.s24_delay_ms(),
                     controls.local_delay_ms(),
+                    controls.s24_muted(),
+                    controls.local_muted(),
                 );
                 last_report = Instant::now();
             }
@@ -783,11 +817,15 @@ impl SessionWorker {
         local_volume_percent: f32,
         s24_delay_ms: u32,
         local_delay_ms: u32,
+        s24_muted: bool,
+        local_muted: bool,
     ) -> Self {
         let controls = SharedControls::new();
         controls.set_local_gain(local_volume_percent / 100.0);
         controls.set_s24_delay_ms(s24_delay_ms);
         controls.set_local_delay_ms(local_delay_ms);
+        controls.set_s24_muted(s24_muted);
+        controls.set_local_muted(local_muted);
         let thread_controls = controls.clone();
         let (result_tx, result_rx) = mpsc::channel();
 
@@ -880,6 +918,8 @@ struct DualOutputApp {
     local_volume_percent: f32,
     s24_delay_ms: u32,
     local_delay_ms: u32,
+    s24_muted: bool,
+    local_muted: bool,
     last_calibration: Option<ChirpAlignment>,
     last_error: Option<String>,
 }
@@ -893,6 +933,8 @@ impl DualOutputApp {
             local_volume_percent: 100.0,
             s24_delay_ms: 0,
             local_delay_ms: 0,
+            s24_muted: false,
+            local_muted: false,
             last_calibration: None,
             last_error: None,
         }
@@ -967,6 +1009,8 @@ impl DualOutputApp {
             self.local_volume_percent,
             self.s24_delay_ms,
             self.local_delay_ms,
+            self.s24_muted,
+            self.local_muted,
         ));
     }
 
@@ -1065,6 +1109,43 @@ impl eframe::App for DualOutputApp {
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
+                        !calibrating,
+                        egui::Button::new(if self.s24_muted {
+                            "Unmute S24"
+                        } else {
+                            "Mute S24"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.s24_muted = !self.s24_muted;
+                    if let Some(worker) = &self.worker {
+                        worker.controls.set_s24_muted(self.s24_muted);
+                    }
+                }
+
+                if ui
+                    .add_enabled(
+                        !calibrating,
+                        egui::Button::new(if self.local_muted {
+                            "Unmute Realtek"
+                        } else {
+                            "Mute Realtek"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.local_muted = !self.local_muted;
+                    if let Some(worker) = &self.worker {
+                        worker.controls.set_local_muted(self.local_muted);
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
                         !running && !calibrating,
                         egui::Button::new("Start"),
                     )
@@ -1103,9 +1184,17 @@ impl eframe::App for DualOutputApp {
                     self.config.mic_device_substring,
                 ));
             } else if running {
-                ui.label("Running · stdout telemetry remains enabled");
+                ui.label(format!(
+                    "Running · S24={} · Realtek={} · stdout telemetry remains enabled",
+                    if self.s24_muted { "MUTED" } else { "ON" },
+                    if self.local_muted { "MUTED" } else { "ON" },
+                ));
             } else {
-                ui.label("Idle");
+                ui.label(format!(
+                    "Idle · S24={} · Realtek={}",
+                    if self.s24_muted { "MUTED" } else { "ON" },
+                    if self.local_muted { "MUTED" } else { "ON" },
+                ));
             }
 
             if let Some(alignment) = self.last_calibration {
@@ -1138,8 +1227,8 @@ pub fn run_dual_output_gui(
 ) -> Result<(), String> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 280.0])
-            .with_min_inner_size([520.0, 240.0])
+            .with_inner_size([560.0, 320.0])
+            .with_min_inner_size([520.0, 280.0])
             .with_resizable(false),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
