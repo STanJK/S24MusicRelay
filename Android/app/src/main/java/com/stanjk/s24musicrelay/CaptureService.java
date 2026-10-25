@@ -26,8 +26,9 @@ public final class CaptureService extends Service {
     public static final String ACTION_START = "com.stanjk.s24musicrelay.START";
     public static final String EXTRA_RESULT_CODE = "resultCode";
     public static final String EXTRA_RESULT_DATA = "resultData";
-    public static final String EXTRA_UDP_HOST = "udpHost";
-    public static final String EXTRA_UDP_PORT = "udpPort";
+
+    private static final String UDP_HOST = "192.168.137.1";
+    private static final int UDP_PORT = 32124;
 
     private static final String CHANNEL_ID = "capture";
     private static final int NOTIFICATION_ID = 24;
@@ -123,8 +124,6 @@ public final class CaptureService extends Service {
     private PcmSpscRing transportRing;
     private FixedDelayLine delayLine;
     private UdpPcmSender udpSender;
-    private String pendingUdpHost;
-    private int pendingUdpPort = UdpPcmSender.DEFAULT_PORT;
 
     @Override
     public void onCreate() {
@@ -155,11 +154,6 @@ public final class CaptureService extends Service {
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
-
-        pendingUdpHost = intent.getStringExtra(EXTRA_UDP_HOST);
-        pendingUdpPort = intent.getIntExtra(
-                EXTRA_UDP_PORT,
-                UdpPcmSender.DEFAULT_PORT);
 
         int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
         Intent resultData;
@@ -267,21 +261,19 @@ public final class CaptureService extends Service {
         transportRing = new PcmSpscRing(TRANSPORT_RING_FRAMES, CHANNELS);
         delayLine = new FixedDelayLine(msToFrames(MAX_DELAY_MS), CHANNELS);
 
-        if (pendingUdpHost != null && !pendingUdpHost.trim().isEmpty()) {
-            try {
-                udpSender = new UdpPcmSender(
-                        pendingUdpHost,
-                        pendingUdpPort,
-                        SAMPLE_RATE,
-                        CHANNELS);
-                udpSender.start();
-            } catch (Throwable t) {
-                fail("UDP disabled: "
-                        + t.getClass().getSimpleName()
-                        + ": "
-                        + t.getMessage());
-                udpSender = null;
-            }
+        try {
+            udpSender = new UdpPcmSender(
+                    UDP_HOST,
+                    UDP_PORT,
+                    SAMPLE_RATE,
+                    CHANNELS);
+            udpSender.start();
+        } catch (Throwable t) {
+            fail("UDP disabled: "
+                    + t.getClass().getSimpleName()
+                    + ": "
+                    + t.getMessage());
+            udpSender = null;
         }
 
         renderedFrames = 0;
