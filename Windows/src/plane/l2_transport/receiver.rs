@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+use socket2::{Domain, Protocol, Socket, Type};
+
 use crate::plane::l1_media::pcm::ring::SourcePcmRing;
 
 use super::{
@@ -26,6 +28,7 @@ pub struct UdpReceiverStats {
     pub duplicate_or_stale_packets: u64,
     pub lost_packets: u64,
     pub concealed_gap_frames: u64,
+    pub skipped_gap_frames: u64,
     pub ring_dropped_frames: u64,
     pub last_sequence: u64,
     pub last_first_frame_id: u64,
@@ -39,6 +42,7 @@ struct Counters {
     duplicate_or_stale_packets: AtomicU64,
     lost_packets: AtomicU64,
     concealed_gap_frames: AtomicU64,
+    skipped_gap_frames: AtomicU64,
     ring_dropped_frames: AtomicU64,
     last_sequence: AtomicU64,
     last_first_frame_id: AtomicU64,
@@ -59,6 +63,9 @@ impl Counters {
             concealed_gap_frames: self
                 .concealed_gap_frames
                 .load(Ordering::Relaxed),
+            skipped_gap_frames: self
+                .skipped_gap_frames
+                .load(Ordering::Relaxed),
             ring_dropped_frames: self
                 .ring_dropped_frames
                 .load(Ordering::Relaxed),
@@ -75,6 +82,7 @@ pub struct UdpReceiver {
     counters: Arc<Counters>,
     thread: Option<JoinHandle<()>>,
     pub local_addr: SocketAddr,
+    pub recv_buffer_bytes: usize,
 }
 
 impl UdpReceiver {
@@ -82,7 +90,19 @@ impl UdpReceiver {
         bind: &str,
         ring: Arc<SourcePcmRing>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let socket = UdpSocket::bind(bind)?;
+        let bind_addr: SocketAddr = bind.parse()?;
+        let domain = if bind_addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+
+        let raw = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+        raw.set_recv_buffer_size(4 * 1024 * 1024)?;
+        raw.bind(&bind_addr.into())?;
+
+        let recv_buffer_bytes = raw.recv_buffer_size()?;
+        let socket: UdpSocket = raw.into();
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
         let local_addr = socket.local_addr()?;
 
@@ -156,6 +176,11 @@ impl UdpReceiver {
                         - previous_reorder.concealed_gap_frames,
                     Ordering::Relaxed,
                 );
+                counters_thread.skipped_gap_frames.fetch_add(
+                    current_reorder.skipped_gap_frames
+                        - previous_reorder.skipped_gap_frames,
+                    Ordering::Relaxed,
+                );
                 previous_reorder = current_reorder;
 
                 for chunk in chunks {
@@ -176,6 +201,7 @@ impl UdpReceiver {
             counters,
             thread: Some(thread),
             local_addr,
+            recv_buffer_bytes,
         })
     }
 
