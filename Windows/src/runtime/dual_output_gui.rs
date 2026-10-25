@@ -990,9 +990,10 @@ impl eframe::App for DualOutputApp {
             ui.separator();
 
             if calibrating {
-                ui.label(
-                    "Calibrating · Realtek/S24 alternating chirps ×5 · USB_MIC",
-                );
+                ui.label(format!(
+                    "Calibrating · Realtek/S24 alternating chirps ×5 · {}",
+                    self.config.mic_device_substring,
+                ));
             } else if running {
                 ui.label("Running · stdout telemetry remains enabled");
             } else {
