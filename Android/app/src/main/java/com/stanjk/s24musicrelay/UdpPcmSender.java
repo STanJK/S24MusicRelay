@@ -188,6 +188,13 @@ final class UdpPcmSender implements AutoCloseable {
         queue.clear();
     }
 
-    private record Chunk(short[] samples, long firstFrameId) {
+    private static final class Chunk {
+        final short[] samples;
+        final long firstFrameId;
+
+        Chunk(short[] samples, long firstFrameId) {
+            this.samples = samples;
+            this.firstFrameId = firstFrameId;
+        }
     }
 }
