@@ -12,5 +12,6 @@ name = "s24relay"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }
 wasapi = "0.26"
 socket2 = "0.6"
