@@ -6,6 +6,7 @@ mod runtime;
 use runtime::{
     render_test::{RenderTestConfig, run_render_test},
     udp_render::{UdpRenderConfig, run_udp_render},
+    udp_send_live::{UdpSendLiveConfig, run_udp_send_live},
     udp_send_test::{UdpSendTestConfig, run_udp_send_test},
 };
 
@@ -35,6 +36,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_render_test(config)
         }
 
+
+
+        Some("udp-send-live") => {
+            let target = parse_arg(&args, "--target")
+                .ok_or("udp-send-live requires --target <phone-ip>:32124")?;
+            let sacrificial_substring = parse_arg(&args, "--sacrificial")
+                .ok_or("udp-send-live requires --sacrificial <default-endpoint-substring>")?;
+            let config = UdpSendLiveConfig {
+                target,
+                sacrificial_substring,
+                seconds: parse_arg(&args, "--seconds")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30),
+                gain: parse_arg(&args, "--gain")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0),
+            };
+            run_udp_send_live(config)
+        }
 
         Some("udp-send-test") => {
             let target = parse_arg(&args, "--target")
@@ -71,7 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "usage:\n  \
                  s24relay render-test [--device Realtek] [--seconds 15] [--tone-hz 440] [--source-ppm 0]\n  \
                  s24relay udp-render [--bind 0.0.0.0:32124] [--device Realtek] [--seconds 30]\n  \
-                 s24relay udp-send-test --target <phone-ip>:32124 [--seconds 30] [--tone-hz 440] [--gain 0.15]"
+                 s24relay udp-send-test --target <phone-ip>:32124 [--seconds 30] [--tone-hz 440] [--gain 0.15]\n  \
+                 s24relay udp-send-live --target <phone-ip>:32124 --sacrificial <substring> [--seconds 30] [--gain 1.0]"
             );
             Ok(())
         }
