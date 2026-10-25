@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use super::protocol::AudioPacket;
 
 const MAX_PENDING_PACKETS: usize = 4;
-const MAX_GAP_CONCEAL_FRAMES: usize = 9_600; // 200 ms @ 48 kHz
+const MAX_INLINE_CONCEAL_FRAMES: usize = 960; // 20 ms @ 48 kHz
 
 #[derive(Clone, Debug, Default)]
 pub struct ReorderStats {
@@ -17,6 +17,7 @@ pub struct ReorderStats {
     pub duplicate_or_stale_packets: u64,
     pub lost_packets: u64,
     pub concealed_gap_frames: u64,
+    pub skipped_gap_frames: u64,
     pub timeline_resets: u64,
 }
 
@@ -82,12 +83,20 @@ impl ReorderBoundary {
                         .saturating_sub(self.next_frame_id)
                         as usize;
 
-                    if gap > 0 && gap <= MAX_GAP_CONCEAL_FRAMES {
-                        output.push(NormalizedChunk {
-                            first_frame_id: self.next_frame_id,
-                            frames: vec![[0.0, 0.0]; gap],
-                        });
-                        self.stats.concealed_gap_frames += gap as u64;
+                    if gap > 0 {
+                        if gap <= MAX_INLINE_CONCEAL_FRAMES {
+                            output.push(NormalizedChunk {
+                                first_frame_id: self.next_frame_id,
+                                frames: vec![[0.0, 0.0]; gap],
+                            });
+                            self.stats.concealed_gap_frames += gap as u64;
+                        } else {
+                            // Large live outage: do not backfill old silence.
+                            // The render side has already represented that wall-
+                            // clock gap via underflow. Replaying the whole gap
+                            // here would create permanent latency debt.
+                            self.stats.skipped_gap_frames += gap as u64;
+                        }
                     }
 
                     self.next_sequence = first_sequence;
@@ -106,12 +115,14 @@ impl ReorderBoundary {
                 let gap =
                     (packet.first_frame_id - self.next_frame_id) as usize;
 
-                if gap <= MAX_GAP_CONCEAL_FRAMES {
+                if gap <= MAX_INLINE_CONCEAL_FRAMES {
                     output.push(NormalizedChunk {
                         first_frame_id: self.next_frame_id,
                         frames: vec![[0.0, 0.0]; gap],
                     });
                     self.stats.concealed_gap_frames += gap as u64;
+                } else {
+                    self.stats.skipped_gap_frames += gap as u64;
                 }
 
                 self.next_frame_id = packet.first_frame_id;
@@ -181,5 +192,25 @@ mod tests {
         assert_eq!(out[0].frames.len(), 240);
         assert!(out[0].frames.iter().all(|f| *f == [0.0, 0.0]));
         assert_eq!(out[1].first_frame_id, 480);
+    }
+
+    #[test]
+    fn large_gap_skips_historical_silence_in_live_mode() {
+        let mut r = ReorderBoundary::default();
+        let _ = r.push(packet(0, 0, 0.0));
+
+        // Force loss confirmation with four future packets. The first future
+        // packet starts 2400 frames ahead (50 ms), above the 20 ms inline
+        // conceal ceiling.
+        assert!(r.push(packet(10, 2400, 1.0)).is_empty());
+        assert!(r.push(packet(11, 2640, 1.0)).is_empty());
+        assert!(r.push(packet(12, 2880, 1.0)).is_empty());
+        let out = r.push(packet(13, 3120, 1.0));
+
+        assert!(!out.is_empty());
+        assert_eq!(out[0].first_frame_id, 2400);
+        let stats = r.stats();
+        assert_eq!(stats.concealed_gap_frames, 0);
+        assert_eq!(stats.skipped_gap_frames, 2160);
     }
 }
