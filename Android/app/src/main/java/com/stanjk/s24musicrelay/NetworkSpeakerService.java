@@ -32,7 +32,7 @@ public final class NetworkSpeakerService extends Service {
     private static final int BLOCK_FRAMES = 480; // 10 ms
     // Music-robust mode: keep a deliberately large playout pool. At 48 kHz
     // this is ~5 s physical capacity with a 1.5 s target pre-roll.
-    private static final int RING_FRAMES = 240_000; // 5.0 s
+    private static final int RING_FRAMES = 262_144; // ~5.46 s, power-of-two ring
     private static final int STARTUP_PRIME_FRAMES = 72_000; // 1.5 s
 
     public interface Listener {
