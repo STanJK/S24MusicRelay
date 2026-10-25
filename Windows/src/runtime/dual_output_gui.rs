@@ -45,7 +45,7 @@ use crate::{
 const BLOCK_FRAMES: usize = 480;
 const LOCAL_QUEUE_BLOCKS: usize = 16;
 const LOCAL_STARTUP_CUSHION_FRAMES: usize = 1_920;
-const MAX_DELAY_MS: u32 = 500;
+const MAX_DELAY_MS: u32 = 3_000;
 const GUI_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug)]
