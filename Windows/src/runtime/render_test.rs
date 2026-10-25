@@ -52,8 +52,7 @@ pub fn run_render_test(
     let mut servo = ClockServo::reference();
     let mut servo_out = ClockServoOutput {
         step: 1.0,
-        correction_ppm: 0.0,
-        fill_error_frames: 0.0,
+        ..ClockServoOutput::default()
     };
 
     // Prime enough source to fill WASAPI once and still retain the servo's
@@ -132,12 +131,17 @@ pub fn run_render_test(
 
         if last_report.elapsed() >= Duration::from_secs(1) {
             println!(
-                "[asrc] residual={} err={:+.0} step={:.9} correction={:+.2}ppm \
+                "[asrc] raw={} filtered={:.1} err={:+.1} step={:.9} \
+                 total={:+.2}ppm drift={:+.2}ppm buffer={:+.2}ppm acquiring={} \
                  underflow={} retired={} producer_drop={} producer_max_late_us={}",
-                ring.available_frames(),
+                servo_out.raw_fill_frames,
+                servo_out.filtered_fill_frames,
                 servo_out.fill_error_frames,
                 servo_out.step,
                 servo_out.correction_ppm,
+                servo_out.drift_estimate_ppm,
+                servo_out.buffer_correction_ppm,
+                servo_out.acquiring,
                 total_underflow,
                 total_retired,
                 producer.dropped_frames(),
