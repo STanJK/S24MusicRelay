@@ -42,8 +42,9 @@ pub fn run_udp_render(
     let receiver = UdpReceiver::start(&config.bind, Arc::clone(&ring))?;
 
     println!(
-        "[udp] listening on {} | waiting for Android PCM",
-        receiver.local_addr
+        "[udp] listening on {} | rcvbuf={} bytes | waiting for Android PCM",
+        receiver.local_addr,
+        receiver.recv_buffer_bytes
     );
 
     let mut asrc = AsrcRuntime::reference();
@@ -134,7 +135,7 @@ pub fn run_udp_render(
             let net = receiver.stats();
 
             println!(
-                "[udp] packets={} seq={} frame={} lost={} reorder={} decode={} conceal={} \
+                "[udp] packets={} seq={} frame={} lost={} reorder={} decode={} conceal={} skip={} \
                  ring={} filtered={:.1} total={:+.1}ppm drift={:+.1}ppm \
                  underflow={} ring_drop={}",
                 net.packets_received,
@@ -144,6 +145,7 @@ pub fn run_udp_render(
                 net.reordered_arrivals,
                 net.decode_errors,
                 net.concealed_gap_frames,
+                net.skipped_gap_frames,
                 ring.available_frames(),
                 servo_out.filtered_fill_frames,
                 servo_out.correction_ppm,
@@ -160,7 +162,7 @@ pub fn run_udp_render(
     let final_net = receiver.stop();
 
     println!(
-        "[done] output={} underflow={} retired={} packets={} lost={} reorder={} decode={} conceal={} ring_drop={}",
+        "[done] output={} underflow={} retired={} packets={} lost={} reorder={} decode={} conceal={} skip={} ring_drop={}",
         total_output,
         total_underflow,
         total_retired,
@@ -169,6 +171,7 @@ pub fn run_udp_render(
         final_net.reordered_arrivals,
         final_net.decode_errors,
         final_net.concealed_gap_frames,
+        final_net.skipped_gap_frames,
         final_net.ring_dropped_frames,
     );
 
