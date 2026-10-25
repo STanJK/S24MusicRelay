@@ -16,6 +16,7 @@ pub struct ClockServoConfig {
     pub occupancy_filter_tau_seconds: f64,
 
     pub acquisition_error_frames: f64,
+    pub acquisition_max_slope_frames_per_second: f64,
     pub acquisition_dwell_seconds: f64,
 
     pub buffer_kp_ppm_per_frame: f64,
@@ -37,6 +38,7 @@ impl Default for ClockServoConfig {
             // under P-only acquisition, but narrow enough to reject the large
             // startup transient seen in HIL.
             acquisition_error_frames: 144.0,
+            acquisition_max_slope_frames_per_second: 20.0,
             acquisition_dwell_seconds: 1.0,
 
             buffer_kp_ppm_per_frame: 2.0,
@@ -61,6 +63,7 @@ pub struct ClockServoOutput {
     pub raw_fill_frames: usize,
     pub filtered_fill_frames: f64,
     pub fill_error_frames: f64,
+    pub filtered_fill_slope_frames_per_second: f64,
 
     pub acquiring: bool,
     pub acquisition_stable_seconds: f64,
@@ -82,6 +85,7 @@ impl ClockServo {
         if config.target_fill_frames <= 0.0
             || config.occupancy_filter_tau_seconds <= 0.0
             || config.acquisition_error_frames <= 0.0
+            || config.acquisition_max_slope_frames_per_second <= 0.0
             || config.acquisition_dwell_seconds <= 0.0
             || config.buffer_kp_ppm_per_frame < 0.0
             || config.max_abs_buffer_ppm <= 0.0
@@ -125,8 +129,16 @@ impl ClockServo {
             0.0
         };
 
+        let previous_filtered_fill = self.filtered_fill_frames;
         self.filtered_fill_frames +=
             alpha * (residual_fill_frames as f64 - self.filtered_fill_frames);
+
+        let filtered_fill_slope_frames_per_second =
+            if dt > 0.0 {
+                (self.filtered_fill_frames - previous_filtered_fill) / dt
+            } else {
+                0.0
+            };
 
         let error =
             self.filtered_fill_frames - self.config.target_fill_frames;
@@ -138,7 +150,13 @@ impl ClockServo {
             );
 
         if !self.tracking {
-            if error.abs() <= self.config.acquisition_error_frames {
+            let position_stable =
+                error.abs() <= self.config.acquisition_error_frames;
+            let motion_stable =
+                filtered_fill_slope_frames_per_second.abs()
+                    <= self.config.acquisition_max_slope_frames_per_second;
+
+            if position_stable && motion_stable {
                 self.acquisition_stable_seconds += dt;
                 if self.acquisition_stable_seconds
                     >= self.config.acquisition_dwell_seconds
@@ -189,6 +207,7 @@ impl ClockServo {
             raw_fill_frames: residual_fill_frames,
             filtered_fill_frames: self.filtered_fill_frames,
             fill_error_frames: error,
+            filtered_fill_slope_frames_per_second,
 
             acquiring: !self.tracking,
             acquisition_stable_seconds: self.acquisition_stable_seconds,
@@ -222,6 +241,13 @@ mod tests {
                 servo.update_after_render(1_600, 480, 48_000.0);
             assert!(out.acquiring);
             assert_eq!(out.drift_estimate_ppm, 0.0);
+
+            if out.fill_error_frames.abs() <= 144.0 {
+                assert!(
+                    out.filtered_fill_slope_frames_per_second.abs() > 20.0,
+                    "moving startup transient must not satisfy acquisition dwell"
+                );
+            }
         }
     }
 
@@ -288,7 +314,10 @@ mod tests {
         assert!((stats.mean_total_ppm - 500.0).abs() < 25.0);
         assert!((stats.mean_drift_ppm - 500.0).abs() < 25.0);
         assert!((stats.mean_filtered_fill - 1_920.0).abs() < 25.0);
-        assert!(stats.minimum_fill > 1_700.0);
+        // Raw FIFO is packet-phase quantized in 240-frame steps. Do not
+        // require it to stay near the filtered target; require only a large
+        // safety margin above FIR/underflow territory.
+        assert!(stats.minimum_fill > 1_440.0);
     }
 
     #[test]
@@ -297,7 +326,7 @@ mod tests {
         assert!((stats.mean_total_ppm + 500.0).abs() < 25.0);
         assert!((stats.mean_drift_ppm + 500.0).abs() < 25.0);
         assert!((stats.mean_filtered_fill - 1_920.0).abs() < 25.0);
-        assert!(stats.minimum_fill > 1_700.0);
+        assert!(stats.minimum_fill > 1_440.0);
     }
 
     #[derive(Clone, Copy, Debug, Default)]
