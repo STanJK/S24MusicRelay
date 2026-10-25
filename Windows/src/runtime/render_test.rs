@@ -129,7 +129,7 @@ pub fn run_render_test(
 
         sink.write_float_stereo(&frames)?;
 
-        if last_report.elapsed() >= Duration::from_secs(1) {
+        if last_report.elapsed() >= Duration::from_secs(2) {
             println!(
                 "[asrc] raw={} filtered={:.1} err={:+.1} step={:.9} \
                  total={:+.2}ppm drift={:+.2}ppm buffer={:+.2}ppm acquiring={} stable={:.2}s \
