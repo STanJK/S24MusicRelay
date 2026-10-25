@@ -229,7 +229,10 @@ mod tests {
     fn acquisition_requires_continuous_dwell_inside_window() {
         let mut servo = ClockServo::reference();
 
-        for _ in 0..50 {
+        // 480 frames at 48 kHz is exactly 10 ms per update.
+        // A 1.0 s acquisition dwell therefore requires 100 complete
+        // in-window updates before TRACK may become active.
+        for _ in 0..99 {
             let out =
                 servo.update_after_render(1_920, 480, 48_000.0);
             assert!(out.acquiring);
