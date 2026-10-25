@@ -13,11 +13,14 @@
 #[derive(Clone, Copy, Debug)]
 pub struct ClockServoConfig {
     pub target_fill_frames: f64,
-    pub occupancy_filter_tau_seconds: f64,
+    pub acquisition_filter_tau_seconds: f64,
+    pub tracking_filter_tau_seconds: f64,
 
     pub acquisition_error_frames: f64,
     pub acquisition_max_slope_frames_per_second: f64,
     pub acquisition_dwell_seconds: f64,
+    pub acquisition_kp_ppm_per_frame: f64,
+    pub max_abs_acquisition_ppm: f64,
 
     pub buffer_kp_ppm_per_frame: f64,
     pub max_abs_buffer_ppm: f64,
@@ -32,18 +35,23 @@ impl Default for ClockServoConfig {
     fn default() -> Self {
         Self {
             target_fill_frames: 1_920.0,
-            occupancy_filter_tau_seconds: 5.0,
 
-            // 8 ms at 48 kHz. Acquisition is P-only, so a constant source-clock
-            // mismatch has a deliberate steady-state position error before the
-            // TRACK integrator takes over. The slope gate rejects moving
-            // startup transients even though this position window is wider.
-            acquisition_error_frames: 384.0,
+            // Acquisition is intentionally much faster than tracking so startup
+            // cushion error is removed quickly without teaching the long-term
+            // drift estimator anything about that transient.
+            acquisition_filter_tau_seconds: 0.5,
+            tracking_filter_tau_seconds: 5.0,
+
+            acquisition_error_frames: 96.0,
             acquisition_max_slope_frames_per_second: 20.0,
             acquisition_dwell_seconds: 1.0,
+            acquisition_kp_ppm_per_frame: 8.0,
+            max_abs_acquisition_ppm: 4_000.0,
 
+            // Once tracking is active, packet-phase jitter should only make
+            // small, slow buffer corrections.
             buffer_kp_ppm_per_frame: 2.0,
-            max_abs_buffer_ppm: 1_000.0,
+            max_abs_buffer_ppm: 500.0,
 
             drift_ki_ppm_per_frame_second: 0.1,
             max_abs_drift_ppm: 1_500.0,
@@ -84,10 +92,13 @@ pub struct ClockServo {
 impl ClockServo {
     pub fn new(config: ClockServoConfig) -> Result<Self, &'static str> {
         if config.target_fill_frames <= 0.0
-            || config.occupancy_filter_tau_seconds <= 0.0
+            || config.acquisition_filter_tau_seconds <= 0.0
+            || config.tracking_filter_tau_seconds <= 0.0
             || config.acquisition_error_frames <= 0.0
             || config.acquisition_max_slope_frames_per_second <= 0.0
             || config.acquisition_dwell_seconds <= 0.0
+            || config.acquisition_kp_ppm_per_frame < 0.0
+            || config.max_abs_acquisition_ppm <= 0.0
             || config.buffer_kp_ppm_per_frame < 0.0
             || config.max_abs_buffer_ppm <= 0.0
             || config.drift_ki_ppm_per_frame_second < 0.0
@@ -124,8 +135,14 @@ impl ClockServo {
         let dt =
             rendered_output_frames as f64 / output_sample_rate_hz.max(1.0);
 
+        let filter_tau_seconds = if self.tracking {
+            self.config.tracking_filter_tau_seconds
+        } else {
+            self.config.acquisition_filter_tau_seconds
+        };
+
         let alpha = if dt > 0.0 {
-            1.0 - (-dt / self.config.occupancy_filter_tau_seconds).exp()
+            1.0 - (-dt / filter_tau_seconds).exp()
         } else {
             0.0
         };
@@ -144,11 +161,7 @@ impl ClockServo {
         let error =
             self.filtered_fill_frames - self.config.target_fill_frames;
 
-        let buffer_correction_ppm =
-            (self.config.buffer_kp_ppm_per_frame * error).clamp(
-                -self.config.max_abs_buffer_ppm,
-                self.config.max_abs_buffer_ppm,
-            );
+        let was_tracking = self.tracking;
 
         if !self.tracking {
             let position_stable =
@@ -169,7 +182,19 @@ impl ClockServo {
             }
         }
 
-        if self.tracking && dt > 0.0 {
+        let buffer_correction_ppm = if was_tracking {
+            (self.config.buffer_kp_ppm_per_frame * error).clamp(
+                -self.config.max_abs_buffer_ppm,
+                self.config.max_abs_buffer_ppm,
+            )
+        } else {
+            (self.config.acquisition_kp_ppm_per_frame * error).clamp(
+                -self.config.max_abs_acquisition_ppm,
+                self.config.max_abs_acquisition_ppm,
+            )
+        };
+
+        if was_tracking && dt > 0.0 {
             let candidate = (
                 self.drift_estimate_ppm
                     + self.config.drift_ki_ppm_per_frame_second
@@ -192,11 +217,14 @@ impl ClockServo {
             }
         }
 
-        let correction_ppm =
+        let correction_ppm = if was_tracking {
             (self.drift_estimate_ppm + buffer_correction_ppm).clamp(
                 -self.config.max_abs_total_ppm,
                 self.config.max_abs_total_ppm,
-            );
+            )
+        } else {
+            buffer_correction_ppm
+        };
 
         ClockServoOutput {
             step: 1.0 + correction_ppm * 1.0e-6,
@@ -230,7 +258,7 @@ mod tests {
         assert_eq!(out.raw_fill_frames, 2_160);
         assert!(out.filtered_fill_frames > 1_920.0);
         assert!(out.filtered_fill_frames < 1_930.0);
-        assert!(out.buffer_correction_ppm < 50.0);
+        assert!(out.buffer_correction_ppm < 100.0);
     }
 
     #[test]
@@ -243,7 +271,7 @@ mod tests {
             assert!(out.acquiring);
             assert_eq!(out.drift_estimate_ppm, 0.0);
 
-            if out.fill_error_frames.abs() <= 384.0 {
+            if out.fill_error_frames.abs() <= 96.0 {
                 assert!(
                     out.filtered_fill_slope_frames_per_second.abs() > 20.0,
                     "moving startup transient must not satisfy acquisition dwell"
@@ -318,7 +346,7 @@ mod tests {
         // Raw FIFO is packet-phase quantized in 240-frame steps. Do not
         // require it to stay near the filtered target; require only a large
         // safety margin above FIR/underflow territory.
-        assert!(stats.minimum_fill > 1_440.0);
+        assert!(stats.minimum_fill > 1_700.0);
     }
 
     #[test]
@@ -327,7 +355,7 @@ mod tests {
         assert!((stats.mean_total_ppm + 500.0).abs() < 25.0);
         assert!((stats.mean_drift_ppm + 500.0).abs() < 25.0);
         assert!((stats.mean_filtered_fill - 1_920.0).abs() < 25.0);
-        assert!(stats.minimum_fill > 1_440.0);
+        assert!(stats.minimum_fill > 1_700.0);
     }
 
     #[derive(Clone, Copy, Debug, Default)]
