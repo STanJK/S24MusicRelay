@@ -7,7 +7,10 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
@@ -19,10 +22,13 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
+import android.util.Log;
 
 import java.util.Arrays;
 
 public final class CaptureService extends Service {
+    private static final String TAG = "S24MusicRelay";
+
     public static final String ACTION_START = "com.stanjk.s24musicrelay.START";
     public static final String EXTRA_RESULT_CODE = "resultCode";
     public static final String EXTRA_RESULT_DATA = "resultData";
@@ -124,10 +130,31 @@ public final class CaptureService extends Service {
     private PcmSpscRing transportRing;
     private FixedDelayLine delayLine;
     private UdpPcmSender udpSender;
+    private AudioManager audioManager;
+    private Handler mainHandler;
+    private AudioDeviceCallback audioDeviceCallback;
 
     @Override
     public void onCreate() {
         super.onCreate();
+
+        mainHandler = new Handler(Looper.getMainLooper());
+        audioManager = getSystemService(AudioManager.class);
+        audioDeviceCallback = new AudioDeviceCallback() {
+            @Override
+            public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+                routeLocalTrackToBuiltinSpeaker("device-added");
+            }
+
+            @Override
+            public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+                routeLocalTrackToBuiltinSpeaker("device-removed");
+            }
+        };
+        if (audioManager != null) {
+            audioManager.registerAudioDeviceCallback(audioDeviceCallback, mainHandler);
+        }
+
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel(
                 CHANNEL_ID, "Audio capture", NotificationManager.IMPORTANCE_LOW));
@@ -257,6 +284,8 @@ public final class CaptureService extends Service {
         if (audioTrack.getState() != AudioTrack.STATE_INITIALIZED) {
             throw new IllegalStateException("AudioTrack not initialized");
         }
+
+        routeLocalTrackToBuiltinSpeaker("track-created");
 
         transportRing = new PcmSpscRing(TRANSPORT_RING_FRAMES, CHANNELS);
         delayLine = new FixedDelayLine(msToFrames(MAX_DELAY_MS), CHANNELS);
@@ -393,6 +422,10 @@ public final class CaptureService extends Service {
         if (!running) return;
 
         track.play();
+        Handler handler = mainHandler;
+        if (handler != null) {
+            handler.postDelayed(() -> logLocalTrackRoute("after-play"), 250);
+        }
 
         while (running) {
             int framesRead = ring.read(transportBlock, 0, RENDER_BLOCK_FRAMES);
@@ -439,6 +472,58 @@ public final class CaptureService extends Service {
                 renderedFrames += RENDER_BLOCK_FRAMES;
             }
         }
+    }
+
+    private void routeLocalTrackToBuiltinSpeaker(String reason) {
+        AudioTrack track = audioTrack;
+        AudioManager manager = audioManager;
+        if (track == null || manager == null) return;
+
+        AudioDeviceInfo speaker = null;
+        for (AudioDeviceInfo device :
+                manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                speaker = device;
+                break;
+            }
+        }
+
+        if (speaker == null) {
+            Log.w(TAG, "[route] " + reason + " builtin speaker not found");
+            return;
+        }
+
+        boolean accepted = track.setPreferredDevice(speaker);
+        Log.i(TAG,
+                "[route] " + reason
+                        + " prefer builtin speaker accepted=" + accepted
+                        + " id=" + speaker.getId()
+                        + " product=" + speaker.getProductName());
+
+        Handler handler = mainHandler;
+        if (handler != null) {
+            handler.postDelayed(() -> logLocalTrackRoute(reason + "/settled"), 250);
+        }
+    }
+
+    private void logLocalTrackRoute(String reason) {
+        AudioTrack track = audioTrack;
+        if (track == null) return;
+
+        AudioDeviceInfo preferred = track.getPreferredDevice();
+        AudioDeviceInfo routed = track.getRoutedDevice();
+
+        Log.i(TAG,
+                "[route] " + reason
+                        + " preferred=" + describeAudioDevice(preferred)
+                        + " actual=" + describeAudioDevice(routed));
+    }
+
+    private static String describeAudioDevice(AudioDeviceInfo device) {
+        if (device == null) return "null";
+        return "type=" + device.getType()
+                + ",id=" + device.getId()
+                + ",product=" + device.getProductName();
     }
 
     private static int msToFrames(int ms) {
@@ -494,6 +579,19 @@ public final class CaptureService extends Service {
     @Override
     public void onDestroy() {
         stopCapture();
+
+        AudioManager manager = audioManager;
+        AudioDeviceCallback callback = audioDeviceCallback;
+        if (manager != null && callback != null) {
+            try {
+                manager.unregisterAudioDeviceCallback(callback);
+            } catch (Throwable ignored) {
+            }
+        }
+        audioDeviceCallback = null;
+        audioManager = null;
+        mainHandler = null;
+
         super.onDestroy();
     }
 
