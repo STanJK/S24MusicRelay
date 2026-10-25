@@ -6,4 +6,5 @@
 pub mod asrc;
 pub mod dsp;
 pub mod pcm;
+pub mod source;
 pub mod timeline;
