@@ -505,12 +505,16 @@ fn run_dual_output(
         })
         .map_err(|error| format!("cannot spawn local render: {error}"))?;
 
-    let source = ProcessLoopbackSource::start_excluding_current_process_tree(16)
-        .map_err(|error| {
+    let source = match ProcessLoopbackSource::start_excluding_current_process_tree(16) {
+        Ok(source) => source,
+        Err(error) => {
             controls.request_stop();
             let _ = local_join.join();
-            format!("Windows Process Loopback startup failed: {error:?}")
-        })?;
+            return Err(format!(
+                "Windows Process Loopback startup failed: {error:?}"
+            ));
+        }
+    };
 
     println!(
         "[dual] target={} codec=LC3 48k/10ms/{}Bch local={} session={}",
@@ -527,8 +531,9 @@ fn run_dual_output(
     let mut bytes_sent = 0u64;
     let mut last_report = Instant::now();
 
-    while !controls.stop_requested() {
-        match source.recv_timeout(Duration::from_millis(50)) {
+    let stream_result: Result<(), String> = (|| {
+        while !controls.stop_requested() {
+            match source.recv_timeout(Duration::from_millis(50)) {
             Ok(chunk) => {
                 assembler.push(
                     chunk.first_frame_id,
@@ -594,28 +599,30 @@ fn run_dual_output(
             }
         }
 
-        if last_report.elapsed() >= Duration::from_secs(2) {
-            let source_stats = source.stats();
-            let local = local_stats.snapshot();
-            println!(
-                "[dual] packets={} bytes={} captured={} src_drop={} disc={} asm_reset={} | local_fifo={} local_underflow={} local_qdrop={} local_reset={} | gain={:.2} s24_delay={}ms local_delay={}ms",
-                packets_sent,
-                bytes_sent,
-                source_stats.captured_frames,
-                source_stats.queue_dropped_frames,
-                source_stats.discontinuities,
-                assembler.resets,
-                local.fifo_frames,
-                local.underflow_frames,
-                local.queue_dropped_frames,
-                local.timeline_resets,
-                controls.local_gain(),
-                controls.s24_delay_ms(),
-                controls.local_delay_ms(),
-            );
-            last_report = Instant::now();
+            if last_report.elapsed() >= Duration::from_secs(2) {
+                let source_stats = source.stats();
+                let local = local_stats.snapshot();
+                println!(
+                    "[dual] packets={} bytes={} captured={} src_drop={} disc={} asm_reset={} | local_fifo={} local_underflow={} local_qdrop={} local_reset={} | gain={:.2} s24_delay={}ms local_delay={}ms",
+                    packets_sent,
+                    bytes_sent,
+                    source_stats.captured_frames,
+                    source_stats.queue_dropped_frames,
+                    source_stats.discontinuities,
+                    assembler.resets,
+                    local.fifo_frames,
+                    local.underflow_frames,
+                    local.queue_dropped_frames,
+                    local.timeline_resets,
+                    controls.local_gain(),
+                    controls.s24_delay_ms(),
+                    controls.local_delay_ms(),
+                );
+                last_report = Instant::now();
+            }
         }
-    }
+        Ok(())
+    })();
 
     drop(local_tx);
 
@@ -626,8 +633,14 @@ fn run_dual_output(
     controls.request_stop();
     let local_result = local_join
         .join()
-        .map_err(|_| "local render thread panicked".to_string())?;
+        .map_err(|_| "local render thread panicked".to_string())
+        .and_then(|result| result);
 
+    if let Err(error) = stream_result {
+        let _ = source_result;
+        let _ = local_result;
+        return Err(error);
+    }
     source_result?;
     local_result?;
 
@@ -740,14 +753,14 @@ impl Drop for DualOutputApp {
 }
 
 impl eframe::App for DualOutputApp {
-    fn update(
+    fn ui(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         _frame: &mut eframe::Frame,
     ) {
         self.poll();
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             ui.heading("S24MusicRelay · Manual alignment");
             ui.add_space(8.0);
 
@@ -813,7 +826,7 @@ impl eframe::App for DualOutputApp {
             }
         });
 
-        ctx.request_repaint_after(GUI_REPAINT_INTERVAL);
+        ui.ctx().request_repaint_after(GUI_REPAINT_INTERVAL);
     }
 }
 
