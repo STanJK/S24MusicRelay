@@ -30,8 +30,10 @@ public final class NetworkSpeakerService extends Service {
     private static final int SAMPLE_RATE = 48_000;
     private static final int CHANNELS = 2;
     private static final int BLOCK_FRAMES = 480; // 10 ms
-    private static final int RING_FRAMES = 16_384; // ~341 ms physical capacity
-    private static final int STARTUP_PRIME_FRAMES = 1_920; // 40 ms
+    // Music-robust mode: keep a deliberately large playout pool. At 48 kHz
+    // this is ~5 s physical capacity with a 1.5 s target pre-roll.
+    private static final int RING_FRAMES = 240_000; // 5.0 s
+    private static final int STARTUP_PRIME_FRAMES = 72_000; // 1.5 s
 
     public interface Listener {
         void onNetworkSpeakerMeter(Snapshot snapshot);
@@ -237,29 +239,55 @@ public final class NetworkSpeakerService extends Service {
         } catch (Throwable ignored) {
         }
 
-        while (running && localRing.availableFrames() < STARTUP_PRIME_FRAMES) {
-            publishSnapshot(localRing, localTrack, localReceiver);
-            SystemClock.sleep(20);
-        }
-        if (!running) return;
-
-        localTrack.play();
-        Log.i(TAG,
-                "[net-speaker] play actual=" + describeDevice(localTrack.getRoutedDevice()));
-
         short[] block = new short[BLOCK_FRAMES * CHANNELS];
         long lastPublishNs = 0;
+        boolean playing = false;
 
         while (running) {
+            if (!playing) {
+                while (running
+                        && localRing.availableFrames() < STARTUP_PRIME_FRAMES) {
+                    publishSnapshot(localRing, localTrack, localReceiver);
+                    SystemClock.sleep(20);
+                }
+                if (!running) break;
+
+                localTrack.play();
+                playing = true;
+                Log.i(TAG,
+                        "[net-speaker] play/re-prime actual="
+                                + describeDevice(localTrack.getRoutedDevice())
+                                + " ring=" + localRing.availableFrames()
+                                + "f");
+            }
+
+            // Do not destructively read a partial block. If the playout pool is
+            // genuinely exhausted, stop this clock domain and rebuild the full
+            // music cushion before resuming.
+            int available = localRing.availableFrames();
+            if (available < BLOCK_FRAMES) {
+                underflowFrames += (BLOCK_FRAMES - available);
+
+                try { localTrack.pause(); } catch (Throwable ignored) {}
+                try { localTrack.flush(); } catch (Throwable ignored) {}
+                playing = false;
+
+                Log.w(TAG,
+                        "[net-speaker] pool exhausted; re-prime "
+                                + STARTUP_PRIME_FRAMES + "f");
+                continue;
+            }
+
             int got = localRing.read(block, 0, BLOCK_FRAMES);
-            if (got < BLOCK_FRAMES) {
-                int missing = BLOCK_FRAMES - got;
-                Arrays.fill(
-                        block,
-                        got * CHANNELS,
-                        block.length,
-                        (short) 0);
-                underflowFrames += missing;
+            if (got != BLOCK_FRAMES) {
+                // SPSC availability raced unexpectedly. Re-enter the same
+                // bounded recovery path rather than extending the timeline.
+                underflowFrames += (BLOCK_FRAMES - got);
+                Arrays.fill(block, (short) 0);
+                try { localTrack.pause(); } catch (Throwable ignored) {}
+                try { localTrack.flush(); } catch (Throwable ignored) {}
+                playing = false;
+                continue;
             }
 
             int samplesWritten = 0;
