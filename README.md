@@ -33,11 +33,11 @@ That last test tells us whether Samsung's per-app gain/mute is downstream or ups
 
 - JDK 17
 - Android SDK 36
-- Android Gradle Plugin 8.13.2
-- Gradle 8.13
+- Android Gradle Plugin 9.4.1
+- Gradle 9.6
 
 The Gradle wrapper is intentionally not committed in this first probe commit; Android Studio can sync the project directly, or generate the wrapper with:
 
 ```bash
-gradle wrapper --gradle-version 8.13
+gradle wrapper --gradle-version 9.6.0
 ```
