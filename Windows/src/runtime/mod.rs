@@ -1,5 +1,7 @@
 //! Process/runtime ownership.
 
+#[cfg(windows)]
+pub mod dual_output_gui;
 pub mod render_test;
 pub mod telemetry;
 pub mod udp_render;
