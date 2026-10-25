@@ -23,7 +23,10 @@ pub fn run_render_test(
 
     use crate::{
         plane::l1_media::{
-            asrc::{runtime::AsrcRuntime, servo::ClockServo},
+            asrc::{
+                runtime::AsrcRuntime,
+                servo::{ClockServo, ClockServoOutput},
+            },
             pcm::ring::SourcePcmRing,
             source::synthetic::SyntheticProducer,
         },
@@ -32,6 +35,10 @@ pub fn run_render_test(
 
     const RING_CAPACITY_FRAMES: usize = 16_384;
     const OUTPUT_RATE_HZ: f64 = 48_000.0;
+
+    let sink =
+        WasapiRenderSink::open(config.device_substring.as_deref())?;
+    let initial_wasapi_frames = sink.available_frames()?;
 
     let ring = Arc::new(SourcePcmRing::new(RING_CAPACITY_FRAMES)?);
     let producer = SyntheticProducer::start(
@@ -43,10 +50,18 @@ pub fn run_render_test(
 
     let mut asrc = AsrcRuntime::reference();
     let mut servo = ClockServo::reference();
+    let mut servo_out = ClockServoOutput {
+        step: 1.0,
+        correction_ppm: 0.0,
+        fill_error_frames: 0.0,
+    };
 
+    // Prime enough source to fill WASAPI once and still retain the servo's
+    // post-render target cushion plus the FIR lookahead/history requirement.
     let startup_target = servo
         .target_fill_frames()
-        .max(asrc.minimum_source_frames() + 480);
+        .saturating_add(initial_wasapi_frames)
+        .saturating_add(asrc.minimum_source_frames());
 
     let startup_deadline = Instant::now() + Duration::from_secs(2);
     while ring.available_frames() < startup_target {
@@ -57,14 +72,13 @@ pub fn run_render_test(
     }
 
     println!(
-        "[asrc] primed source FIFO={} target={} source_ppm={:+.3}",
+        "[asrc] primed source FIFO={} residual_target={} wasapi_initial={} \
+         source_ppm={:+.3}",
         ring.available_frames(),
         servo.target_fill_frames(),
+        initial_wasapi_frames,
         config.source_ppm
     );
-
-    let sink =
-        WasapiRenderSink::open(config.device_substring.as_deref())?;
 
     let mut total_output = 0u64;
     let mut total_underflow = 0u64;
@@ -72,16 +86,21 @@ pub fn run_render_test(
     let mut last_report = Instant::now();
     let started = Instant::now();
 
-    let initial = sink.available_frames()?;
-    if initial > 0 {
-        let servo_out =
-            servo.update(ring.available_frames(), initial, OUTPUT_RATE_HZ);
-        let mut frames = vec![[0.0f32; 2]; initial];
+    if initial_wasapi_frames > 0 {
+        let mut frames = vec![[0.0f32; 2]; initial_wasapi_frames];
         let result =
             asrc.render(&ring, &mut frames, servo_out.step);
-        total_output += initial as u64;
+
+        total_output += initial_wasapi_frames as u64;
         total_underflow += result.underflow_frames as u64;
         total_retired += result.retired_source_frames as u64;
+
+        servo_out = servo.update_after_render(
+            ring.available_frames(),
+            initial_wasapi_frames,
+            OUTPUT_RATE_HZ,
+        );
+
         sink.write_float_stereo(&frames)?;
     }
 
@@ -95,8 +114,6 @@ pub fn run_render_test(
             continue;
         }
 
-        let servo_out =
-            servo.update(ring.available_frames(), available, OUTPUT_RATE_HZ);
         let mut frames = vec![[0.0f32; 2]; available];
         let result =
             asrc.render(&ring, &mut frames, servo_out.step);
@@ -105,11 +122,17 @@ pub fn run_render_test(
         total_underflow += result.underflow_frames as u64;
         total_retired += result.retired_source_frames as u64;
 
+        servo_out = servo.update_after_render(
+            ring.available_frames(),
+            available,
+            OUTPUT_RATE_HZ,
+        );
+
         sink.write_float_stereo(&frames)?;
 
         if last_report.elapsed() >= Duration::from_secs(1) {
             println!(
-                "[asrc] fill={} err={:+.0} step={:.9} correction={:+.2}ppm \
+                "[asrc] residual={} err={:+.0} step={:.9} correction={:+.2}ppm \
                  underflow={} retired={} producer_drop={}",
                 ring.available_frames(),
                 servo_out.fill_error_frames,

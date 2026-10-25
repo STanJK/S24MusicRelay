@@ -1,8 +1,8 @@
 //! FIFO-occupancy clock servo.
 //!
-//! Positive fill error means the source clock is winning and the ASRC must
-//! consume source frames faster, so the returned step rises above 1.0.
-//! Negative error produces the opposite correction.
+//! The servo observes residual FIFO fill after a render operation. Positive
+//! error means the source clock is winning and the next ASRC step must rise
+//! above 1.0; negative error produces the opposite correction.
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClockServoConfig {
@@ -16,8 +16,8 @@ impl Default for ClockServoConfig {
     fn default() -> Self {
         Self {
             target_fill_frames: 1_920.0,
-            kp_ppm_per_frame: 0.5,
-            ki_ppm_per_frame_second: 0.08,
+            kp_ppm_per_frame: 5.0,
+            ki_ppm_per_frame_second: 1.0,
             max_abs_ppm: 2_000.0,
         }
     }
@@ -61,15 +61,16 @@ impl ClockServo {
         self.config.target_fill_frames.round() as usize
     }
 
-    pub fn update(
+    pub fn update_after_render(
         &mut self,
-        observed_fill_frames: usize,
-        output_frames: usize,
+        residual_fill_frames: usize,
+        rendered_output_frames: usize,
         output_sample_rate_hz: f64,
     ) -> ClockServoOutput {
         let error =
-            observed_fill_frames as f64 - self.config.target_fill_frames;
-        let dt = output_frames as f64 / output_sample_rate_hz.max(1.0);
+            residual_fill_frames as f64 - self.config.target_fill_frames;
+        let dt =
+            rendered_output_frames as f64 / output_sample_rate_hz.max(1.0);
 
         self.integral_frame_seconds += error * dt;
 
@@ -109,20 +110,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn correction_sign_matches_fifo_error() {
+    fn correction_sign_matches_residual_fifo_error() {
         let mut high = ClockServo::reference();
-        let high_out = high.update(2_400, 480, 48_000.0);
+        let high_out =
+            high.update_after_render(2_400, 480, 48_000.0);
         assert!(high_out.step > 1.0);
 
         let mut low = ClockServo::reference();
-        let low_out = low.update(1_200, 480, 48_000.0);
+        let low_out =
+            low.update_after_render(1_200, 480, 48_000.0);
         assert!(low_out.step < 1.0);
     }
 
     #[test]
     fn correction_is_bounded() {
         let mut servo = ClockServo::reference();
-        let out = servo.update(100_000, 480, 48_000.0);
+        let out =
+            servo.update_after_render(100_000, 480, 48_000.0);
         assert!(out.correction_ppm <= 2_000.0);
     }
 }
