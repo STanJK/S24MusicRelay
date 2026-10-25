@@ -241,21 +241,65 @@ public final class NetworkSpeakerService extends Service {
 
         short[] block = new short[BLOCK_FRAMES * CHANNELS];
         long lastPublishNs = 0;
+        long observedSessionGeneration = -1;
         boolean playing = false;
 
         while (running) {
+            long sessionGeneration = localReceiver.sessionGeneration();
+            if (sessionGeneration != observedSessionGeneration) {
+                observedSessionGeneration = sessionGeneration;
+
+                // A new wire session is a hard presentation boundary. ring.clear()
+                // alone is insufficient because AudioTrack may still own old PCM
+                // and the producer can refill >=1 block before this thread runs.
+                // Force the renderer back to the deterministic 1.5 s prime state.
+                if (playing) {
+                    try { localTrack.pause(); } catch (Throwable ignored) {}
+                    try { localTrack.flush(); } catch (Throwable ignored) {}
+                }
+                playing = false;
+
+                Log.i(TAG,
+                        "[net-speaker] session generation="
+                                + observedSessionGeneration
+                                + " -> flush/re-prime");
+            }
+
             if (!playing) {
                 while (running
                         && localRing.availableFrames() < STARTUP_PRIME_FRAMES) {
+                    long currentGeneration = localReceiver.sessionGeneration();
+                    if (currentGeneration != observedSessionGeneration) {
+                        observedSessionGeneration = currentGeneration;
+                        try { localTrack.pause(); } catch (Throwable ignored) {}
+                        try { localTrack.flush(); } catch (Throwable ignored) {}
+                        Log.i(TAG,
+                                "[net-speaker] session generation="
+                                        + observedSessionGeneration
+                                        + " while priming; restart prime");
+                    }
+
                     publishSnapshot(localRing, localTrack, localReceiver);
                     SystemClock.sleep(20);
                 }
                 if (!running) break;
 
+                // Re-check after the prime condition. A session switch can race
+                // the final occupancy observation; if it did, restart the prime.
+                long currentGeneration = localReceiver.sessionGeneration();
+                if (currentGeneration != observedSessionGeneration) {
+                    observedSessionGeneration = currentGeneration;
+                    try { localTrack.pause(); } catch (Throwable ignored) {}
+                    try { localTrack.flush(); } catch (Throwable ignored) {}
+                    continue;
+                }
+
                 localTrack.play();
                 playing = true;
                 Log.i(TAG,
-                        "[net-speaker] play/re-prime actual="
+                        "[net-speaker] play/re-prime generation="
+                                + observedSessionGeneration
+                                + " actual="
                                 + describeDevice(localTrack.getRoutedDevice())
                                 + " ring=" + localRing.availableFrames()
                                 + "f");
