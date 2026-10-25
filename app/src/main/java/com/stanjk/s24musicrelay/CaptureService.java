@@ -13,10 +13,10 @@ import android.media.AudioRecord;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.Process;
-
-import java.util.Locale;
 
 public final class CaptureService extends Service {
     public static final String ACTION_START = "com.stanjk.s24musicrelay.START";
@@ -165,6 +165,9 @@ public final class CaptureService extends Service {
     }
 
     private void captureLoop() {
+        final AudioRecord record = audioRecord;
+        if (record == null) return;
+
         short[] pcm = new short[1920]; // 20 ms stereo @ 48 kHz
         long frames = 0;
         long lastPublishNs = 0;
