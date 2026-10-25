@@ -260,6 +260,11 @@ final class UdpPcmReceiver implements AutoCloseable {
         }
 
         long skipped = count * FRAME_SAMPLES;
+
+        // Music-robust policy: a long missing run may lose content, but it must
+        // never shorten the source timeline. Insert equal-duration silence so
+        // post-outage audio keeps the same absolute presentation position.
+        writeSilenceFrames(skipped);
         skippedGapFrames.addAndGet(skipped);
         nextFrameId += skipped;
         decoder.reset();
@@ -273,6 +278,7 @@ final class UdpPcmReceiver implements AutoCloseable {
                 long missingPackets = gapFrames / FRAME_SAMPLES;
                 representMissingPackets(missingPackets);
             } else {
+                writeSilenceFrames(gapFrames);
                 skippedGapFrames.addAndGet(gapFrames);
                 decoder.reset();
             }
@@ -287,6 +293,20 @@ final class UdpPcmReceiver implements AutoCloseable {
 
         writePcm(decoder.decode(packet.left, packet.right));
         nextFrameId = packet.firstFrameId + FRAME_SAMPLES;
+    }
+
+    private void writeSilenceFrames(long frames) {
+        short[] zero = new short[FRAME_SAMPLES * CHANNELS];
+        long remaining = frames;
+
+        while (remaining > 0) {
+            int chunk = (int) Math.min(FRAME_SAMPLES, remaining);
+            int written = ring.write(zero, 0, chunk);
+            if (written < chunk) {
+                ringDroppedFrames.addAndGet(chunk - written);
+            }
+            remaining -= chunk;
+        }
     }
 
     private void writePcm(short[] stereo) {
