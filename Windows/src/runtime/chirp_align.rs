@@ -34,12 +34,12 @@ use crate::{
 const BLOCK_FRAMES: usize = 480;
 const RUNS: usize = 10;
 const WARMUP_MS: usize = 3_000;
-const INTERVAL_MS: usize = 1_000;
+const INTERVAL_MS: usize = 3_000;
 const CHIRP_MS: usize = 60;
-const TAIL_MS: usize = 800;
+const TAIL_MS: usize = 2_500;
 const MIC_PREROLL_MS: usize = 500;
-const SEARCH_EARLY_MS: usize = 100;
-const SEARCH_LATE_MS: usize = 700;
+const SEARCH_EARLY_MS: usize = 200;
+const SEARCH_LATE_MS: usize = 2_500;
 const CORRELATION_DECIMATION: usize = 4;
 const MIN_CORRELATION: f64 = 0.08;
 const LOCAL_QUEUE_BLOCKS: usize = 32;
