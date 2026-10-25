@@ -23,7 +23,7 @@ impl WasapiRenderSink {
     pub fn open(
         device_substring: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        initialize_mta()?;
+        initialize_mta().ok()?;
 
         let enumerator = DeviceEnumerator::new()?;
         let device = select_device(&enumerator, device_substring)?;
