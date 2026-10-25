@@ -25,6 +25,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
     private TextView meter;
     private TextView delayLabel;
     private TextView shizukuStatus;
+    private TextView networkMeter;
     private MediaProjectionManager projectionManager;
 
     private final Shizuku.OnBinderReceivedListener binderReceivedListener =
