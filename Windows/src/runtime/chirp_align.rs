@@ -357,11 +357,6 @@ pub fn run_chirp_align(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let chirp = generate_reference_chirp();
 
-    let mic = MicCapture::start(&config.mic_device_substring)
-        .map_err(|error| format!("microphone startup failed: {error}"))?;
-
-    thread::sleep(Duration::from_millis(MIC_PREROLL_MS as u64));
-
     let (local_tx, local_rx) =
         mpsc::sync_channel::<LocalBlock>(LOCAL_QUEUE_BLOCKS);
     let local_device = config.local_device_substring.clone();
@@ -387,6 +382,10 @@ pub fn run_chirp_align(
     };
     let left_encoder = Lc3Encoder::new(codec)?;
     let right_encoder = Lc3Encoder::new(codec)?;
+
+    let mic = MicCapture::start(&config.mic_device_substring)
+        .map_err(|error| format!("microphone startup failed: {error}"))?;
+    thread::sleep(Duration::from_millis(MIC_PREROLL_MS as u64));
 
     let total_ms =
         WARMUP_MS + (RUNS - 1) * INTERVAL_MS + CHIRP_MS + TAIL_MS;
