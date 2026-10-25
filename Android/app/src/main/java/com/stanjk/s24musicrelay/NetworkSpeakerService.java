@@ -202,10 +202,27 @@ public final class NetworkSpeakerService extends Service {
         }
 
         boolean accepted = localTrack.setPreferredDevice(speaker);
+
+        int trackCapacityFrames = localTrack.getBufferCapacityInFrames();
+        int trackBufferFrames = localTrack.getBufferSizeInFrames();
+        int trackStartThresholdFrames;
+        if (Build.VERSION.SDK_INT >= 31) {
+            int requestedStartThreshold =
+                    Math.max(1, Math.min(BLOCK_FRAMES, trackCapacityFrames));
+            trackStartThresholdFrames =
+                    localTrack.setStartThresholdInFrames(requestedStartThreshold);
+        } else {
+            // Pre-S fallback: prime the complete app-visible AudioTrack buffer.
+            trackStartThresholdFrames = Math.max(1, trackBufferFrames);
+        }
+
         Log.i(TAG,
                 "[net-speaker] prefer builtin accepted=" + accepted
                         + " id=" + speaker.getId()
-                        + " product=" + speaker.getProductName());
+                        + " product=" + speaker.getProductName()
+                        + " trackCapacity=" + trackCapacityFrames + "f"
+                        + " trackBuffer=" + trackBufferFrames + "f"
+                        + " startThreshold=" + trackStartThresholdFrames + "f");
 
         PcmSpscRing localRing = new PcmSpscRing(RING_FRAMES, CHANNELS);
         UdpPcmReceiver localReceiver = new UdpPcmReceiver(localRing);
@@ -297,75 +314,166 @@ public final class NetworkSpeakerService extends Service {
                     continue;
                 }
 
+                // AudioTrack has its own streaming start threshold. Calling
+                // play() before writing enough data lets the platform insert a
+                // route-dependent startup gate that is not represented by our
+                // 1.5 s ring timeline. Prime the native track first, then play.
+                int trackPrimeFrames;
+                if (Build.VERSION.SDK_INT >= 31) {
+                    int requestedStartThreshold = Math.max(
+                            1,
+                            Math.min(
+                                    BLOCK_FRAMES,
+                                    localTrack.getBufferCapacityInFrames()));
+                    trackPrimeFrames = localTrack.setStartThresholdInFrames(
+                            requestedStartThreshold);
+                } else {
+                    trackPrimeFrames = Math.max(
+                            1,
+                            localTrack.getBufferSizeInFrames());
+                }
+
+                short[] trackPrime =
+                        new short[trackPrimeFrames * CHANNELS];
+                int primeRead = localRing.read(
+                        trackPrime,
+                        0,
+                        trackPrimeFrames);
+                if (primeRead != trackPrimeFrames) {
+                    // The external pool had already crossed 72k frames, so
+                    // this indicates a session/reset race. Re-enter prime rather
+                    // than starting with an unaccounted native threshold.
+                    Log.w(TAG,
+                            "[net-speaker] native-prime read race "
+                                    + primeRead + "/" + trackPrimeFrames);
+                    continue;
+                }
+
+                int primeSamplesWritten = 0;
+                while (running
+                        && primeSamplesWritten < trackPrime.length) {
+                    int n = localTrack.write(
+                            trackPrime,
+                            primeSamplesWritten,
+                            trackPrime.length - primeSamplesWritten,
+                            AudioTrack.WRITE_BLOCKING);
+                    if (n < 0) {
+                        fail("AudioTrack prime write=" + n);
+                        running = false;
+                        break;
+                    }
+                    if (n == 0) {
+                        Thread.yield();
+                        continue;
+                    }
+                    primeSamplesWritten += n;
+                }
+                if (!running) break;
+
+                long playIssuedNs = SystemClock.elapsedRealtimeNanos();
                 localTrack.play();
                 playing = true;
+
                 Log.i(TAG,
                         "[net-speaker] play/re-prime generation="
                                 + observedSessionGeneration
+                                + " nativePrime=" + trackPrimeFrames + "f"
+                                + " ringAfterPrime="
+                                + localRing.availableFrames() + "f"
                                 + " actual="
-                                + describeDevice(localTrack.getRoutedDevice())
-                                + " ring=" + localRing.availableFrames()
-                                + "f");
-            }
+                                + describeDevice(localTrack.getRoutedDevice()));
 
-            // Do not destructively read a partial block. If the playout pool is
-            // genuinely exhausted, stop this clock domain and rebuild the full
-            // music cushion before resuming.
-            int available = localRing.availableFrames();
-            if (available < BLOCK_FRAMES) {
-                underflowFrames += (BLOCK_FRAMES - available);
+                // flush() resets the playback head to zero. Observe when the
+                // native clock actually begins to advance so HIL can prove
+                // whether any hidden stream-start delay remains.
+                boolean playbackHeadStarted = false;
 
-                try { localTrack.pause(); } catch (Throwable ignored) {}
-                try { localTrack.flush(); } catch (Throwable ignored) {}
-                playing = false;
+                while (running && playing) {
+                    if (!playbackHeadStarted) {
+                        long head = Integer.toUnsignedLong(
+                                localTrack.getPlaybackHeadPosition());
+                        if (head > 0) {
+                            playbackHeadStarted = true;
+                            long elapsedUs =
+                                    (SystemClock.elapsedRealtimeNanos()
+                                            - playIssuedNs) / 1_000L;
+                            Log.i(TAG,
+                                    "[net-speaker] playback-head-start "
+                                            + "generation="
+                                            + observedSessionGeneration
+                                            + " head=" + head + "f"
+                                            + " after=" + elapsedUs + "us");
+                        }
+                    }
 
-                Log.w(TAG,
-                        "[net-speaker] pool exhausted; re-prime "
-                                + STARTUP_PRIME_FRAMES + "f");
+                    // A new session is a hard boundary even while actively
+                    // rendering. Break back to the outer generation handler.
+                    if (localReceiver.sessionGeneration()
+                            != observedSessionGeneration) {
+                        break;
+                    }
+
+                    int available = localRing.availableFrames();
+                    if (available < BLOCK_FRAMES) {
+                        underflowFrames += (BLOCK_FRAMES - available);
+
+                        try { localTrack.pause(); } catch (Throwable ignored) {}
+                        try { localTrack.flush(); } catch (Throwable ignored) {}
+                        playing = false;
+
+                        Log.w(TAG,
+                                "[net-speaker] pool exhausted; re-prime "
+                                        + STARTUP_PRIME_FRAMES + "f");
+                        break;
+                    }
+
+                    int got = localRing.read(block, 0, BLOCK_FRAMES);
+                    if (got != BLOCK_FRAMES) {
+                        underflowFrames += (BLOCK_FRAMES - got);
+                        Arrays.fill(block, (short) 0);
+                        try { localTrack.pause(); } catch (Throwable ignored) {}
+                        try { localTrack.flush(); } catch (Throwable ignored) {}
+                        playing = false;
+                        break;
+                    }
+
+                    int samplesWritten = 0;
+                    while (running && samplesWritten < block.length) {
+                        int n = localTrack.write(
+                                block,
+                                samplesWritten,
+                                block.length - samplesWritten,
+                                AudioTrack.WRITE_BLOCKING);
+
+                        if (n < 0) {
+                            fail("AudioTrack.write=" + n);
+                            running = false;
+                            break;
+                        }
+                        if (n == 0) {
+                            Thread.yield();
+                            continue;
+                        }
+                        samplesWritten += n;
+                    }
+
+                    if (samplesWritten == block.length) {
+                        renderedFrames += BLOCK_FRAMES;
+                    }
+
+                    long now = System.nanoTime();
+                    if (now - lastPublishNs >= 200_000_000L) {
+                        lastPublishNs = now;
+                        publishSnapshot(localRing, localTrack, localReceiver);
+                    }
+                }
+
+                // Return to the outer state machine. It will handle a session
+                // generation edge or wait for a fresh full external prime.
                 continue;
             }
 
-            int got = localRing.read(block, 0, BLOCK_FRAMES);
-            if (got != BLOCK_FRAMES) {
-                // SPSC availability raced unexpectedly. Re-enter the same
-                // bounded recovery path rather than extending the timeline.
-                underflowFrames += (BLOCK_FRAMES - got);
-                Arrays.fill(block, (short) 0);
-                try { localTrack.pause(); } catch (Throwable ignored) {}
-                try { localTrack.flush(); } catch (Throwable ignored) {}
-                playing = false;
-                continue;
-            }
 
-            int samplesWritten = 0;
-            while (running && samplesWritten < block.length) {
-                int n = localTrack.write(
-                        block,
-                        samplesWritten,
-                        block.length - samplesWritten,
-                        AudioTrack.WRITE_BLOCKING);
-
-                if (n < 0) {
-                    fail("AudioTrack.write=" + n);
-                    running = false;
-                    break;
-                }
-                if (n == 0) {
-                    Thread.yield();
-                    continue;
-                }
-                samplesWritten += n;
-            }
-
-            if (samplesWritten == block.length) {
-                renderedFrames += BLOCK_FRAMES;
-            }
-
-            long now = System.nanoTime();
-            if (now - lastPublishNs >= 200_000_000L) {
-                lastPublishNs = now;
-                publishSnapshot(localRing, localTrack, localReceiver);
-            }
         }
     }
 
