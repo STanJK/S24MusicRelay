@@ -1,22 +1,22 @@
 //! Two-timescale FIFO-occupancy clock servo.
 //!
-//! Raw producer fill is intentionally NOT fed straight into the controller.
-//! Packet/block arrival granularity and scheduler jitter create a high-rate
-//! sawtooth that is unrelated to oscillator drift. The servo therefore:
+//! Raw producer fill is low-pass filtered before control. Startup acquisition
+//! and steady-state drift learning are separate states:
 //!
-//! 1. low-pass filters post-render residual FIFO occupancy;
-//! 2. uses a bounded proportional term for small/fast cushion correction;
-//! 3. learns long-term source/render mismatch in a slow integral term;
-//! 4. keeps acquisition separate so startup transients do not poison drift.
+//! - ACQUIRE: bounded proportional cushion control only. No drift learning.
+//! - TRACK: slow integral drift estimator + small proportional buffer trim.
 //!
-//! Positive residual error means the source clock is winning and the next
-//! ASRC step must rise above 1.0. Negative error means the opposite.
+//! TRACK is entered only after filtered FIFO error remains inside a bounded
+//! acquisition window for a continuous dwell interval. This prevents startup
+//! FIFO transients from being mislearned as oscillator mismatch.
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClockServoConfig {
     pub target_fill_frames: f64,
     pub occupancy_filter_tau_seconds: f64,
-    pub acquisition_seconds: f64,
+
+    pub acquisition_error_frames: f64,
+    pub acquisition_dwell_seconds: f64,
 
     pub buffer_kp_ppm_per_frame: f64,
     pub max_abs_buffer_ppm: f64,
@@ -32,7 +32,12 @@ impl Default for ClockServoConfig {
         Self {
             target_fill_frames: 1_920.0,
             occupancy_filter_tau_seconds: 0.5,
-            acquisition_seconds: 1.0,
+
+            // 3 ms at 48 kHz. Wide enough that a +/-500 ppm source can settle
+            // under P-only acquisition, but narrow enough to reject the large
+            // startup transient seen in HIL.
+            acquisition_error_frames: 144.0,
+            acquisition_dwell_seconds: 1.0,
 
             buffer_kp_ppm_per_frame: 5.0,
             max_abs_buffer_ppm: 750.0,
@@ -58,6 +63,7 @@ pub struct ClockServoOutput {
     pub fill_error_frames: f64,
 
     pub acquiring: bool,
+    pub acquisition_stable_seconds: f64,
 }
 
 #[derive(Debug)]
@@ -65,15 +71,18 @@ pub struct ClockServo {
     config: ClockServoConfig,
 
     filtered_fill_frames: f64,
-    elapsed_seconds: f64,
     drift_estimate_ppm: f64,
+
+    tracking: bool,
+    acquisition_stable_seconds: f64,
 }
 
 impl ClockServo {
     pub fn new(config: ClockServoConfig) -> Result<Self, &'static str> {
         if config.target_fill_frames <= 0.0
             || config.occupancy_filter_tau_seconds <= 0.0
-            || config.acquisition_seconds < 0.0
+            || config.acquisition_error_frames <= 0.0
+            || config.acquisition_dwell_seconds <= 0.0
             || config.buffer_kp_ppm_per_frame < 0.0
             || config.max_abs_buffer_ppm <= 0.0
             || config.drift_ki_ppm_per_frame_second < 0.0
@@ -85,8 +94,9 @@ impl ClockServo {
 
         Ok(Self {
             filtered_fill_frames: config.target_fill_frames,
-            elapsed_seconds: 0.0,
             drift_estimate_ppm: 0.0,
+            tracking: false,
+            acquisition_stable_seconds: 0.0,
             config,
         })
     }
@@ -118,23 +128,29 @@ impl ClockServo {
         self.filtered_fill_frames +=
             alpha * (residual_fill_frames as f64 - self.filtered_fill_frames);
 
-        self.elapsed_seconds += dt;
-
         let error =
             self.filtered_fill_frames - self.config.target_fill_frames;
 
-        let buffer_correction_ppm = (
-            self.config.buffer_kp_ppm_per_frame * error
-        )
-            .clamp(
+        let buffer_correction_ppm =
+            (self.config.buffer_kp_ppm_per_frame * error).clamp(
                 -self.config.max_abs_buffer_ppm,
                 self.config.max_abs_buffer_ppm,
             );
 
-        let acquiring =
-            self.elapsed_seconds < self.config.acquisition_seconds;
+        if !self.tracking {
+            if error.abs() <= self.config.acquisition_error_frames {
+                self.acquisition_stable_seconds += dt;
+                if self.acquisition_stable_seconds
+                    >= self.config.acquisition_dwell_seconds
+                {
+                    self.tracking = true;
+                }
+            } else {
+                self.acquisition_stable_seconds = 0.0;
+            }
+        }
 
-        if !acquiring && dt > 0.0 {
+        if self.tracking && dt > 0.0 {
             let candidate = (
                 self.drift_estimate_ppm
                     + self.config.drift_ki_ppm_per_frame_second
@@ -146,10 +162,6 @@ impl ClockServo {
                     self.config.max_abs_drift_ppm,
                 );
 
-            // Basic anti-windup: if the proposed integral update would push the
-            // total correction farther into saturation, keep the old drift
-            // estimate until the buffer term moves back toward the linear
-            // control region.
             let candidate_total =
                 candidate + buffer_correction_ppm;
             let would_worsen_saturation =
@@ -161,10 +173,8 @@ impl ClockServo {
             }
         }
 
-        let correction_ppm = (
-            self.drift_estimate_ppm + buffer_correction_ppm
-        )
-            .clamp(
+        let correction_ppm =
+            (self.drift_estimate_ppm + buffer_correction_ppm).clamp(
                 -self.config.max_abs_total_ppm,
                 self.config.max_abs_total_ppm,
             );
@@ -180,7 +190,8 @@ impl ClockServo {
             filtered_fill_frames: self.filtered_fill_frames,
             fill_error_frames: error,
 
-            acquiring,
+            acquiring: !self.tracking,
+            acquisition_stable_seconds: self.acquisition_stable_seconds,
         }
     }
 }
@@ -203,10 +214,10 @@ mod tests {
     }
 
     #[test]
-    fn acquisition_does_not_poison_drift_estimate() {
+    fn large_startup_error_cannot_enter_tracking_or_poison_drift() {
         let mut servo = ClockServo::reference();
 
-        for _ in 0..50 {
+        for _ in 0..500 {
             let out =
                 servo.update_after_render(1_600, 480, 48_000.0);
             assert!(out.acquiring);
@@ -215,10 +226,25 @@ mod tests {
     }
 
     #[test]
+    fn acquisition_requires_continuous_dwell_inside_window() {
+        let mut servo = ClockServo::reference();
+
+        for _ in 0..50 {
+            let out =
+                servo.update_after_render(1_920, 480, 48_000.0);
+            assert!(out.acquiring);
+        }
+
+        let out =
+            servo.update_after_render(1_920, 480, 48_000.0);
+        assert!(!out.acquiring);
+    }
+
+    #[test]
     fn correction_sign_matches_filtered_fifo_error() {
         let mut high = ClockServo::reference();
         let mut high_out = ClockServoOutput::default();
-        for _ in 0..200 {
+        for _ in 0..400 {
             high_out =
                 high.update_after_render(2_400, 480, 48_000.0);
         }
@@ -226,7 +252,7 @@ mod tests {
 
         let mut low = ClockServo::reference();
         let mut low_out = ClockServoOutput::default();
-        for _ in 0..200 {
+        for _ in 0..400 {
             low_out =
                 low.update_after_render(1_200, 480, 48_000.0);
         }
@@ -235,20 +261,22 @@ mod tests {
 
     #[test]
     fn closed_loop_learns_plus_500_ppm_and_recenters_fifo() {
-        let (fill, out) = simulate_constant_clock_error(500.0, 60.0);
+        let (fill, out) = simulate_constant_clock_error(500.0, 90.0);
 
-        assert!((fill - 1_920.0).abs() < 10.0);
-        assert!((out.drift_estimate_ppm - 500.0).abs() < 25.0);
-        assert!((out.correction_ppm - 500.0).abs() < 25.0);
+        assert!(!out.acquiring);
+        assert!((fill - 1_920.0).abs() < 15.0);
+        assert!((out.drift_estimate_ppm - 500.0).abs() < 35.0);
+        assert!((out.correction_ppm - 500.0).abs() < 35.0);
     }
 
     #[test]
     fn closed_loop_learns_minus_500_ppm_and_recenters_fifo() {
-        let (fill, out) = simulate_constant_clock_error(-500.0, 60.0);
+        let (fill, out) = simulate_constant_clock_error(-500.0, 90.0);
 
-        assert!((fill - 1_920.0).abs() < 10.0);
-        assert!((out.drift_estimate_ppm + 500.0).abs() < 25.0);
-        assert!((out.correction_ppm + 500.0).abs() < 25.0);
+        assert!(!out.acquiring);
+        assert!((fill - 1_920.0).abs() < 15.0);
+        assert!((out.drift_estimate_ppm + 500.0).abs() < 35.0);
+        assert!((out.correction_ppm + 500.0).abs() < 35.0);
     }
 
     fn simulate_constant_clock_error(
