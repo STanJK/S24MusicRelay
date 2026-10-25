@@ -132,7 +132,7 @@ pub fn run_render_test(
         if last_report.elapsed() >= Duration::from_secs(1) {
             println!(
                 "[asrc] raw={} filtered={:.1} err={:+.1} step={:.9} \
-                 total={:+.2}ppm drift={:+.2}ppm buffer={:+.2}ppm acquiring={} \
+                 total={:+.2}ppm drift={:+.2}ppm buffer={:+.2}ppm acquiring={} stable={:.2}s \
                  underflow={} retired={} producer_drop={} producer_max_late_us={}",
                 servo_out.raw_fill_frames,
                 servo_out.filtered_fill_frames,
@@ -142,6 +142,7 @@ pub fn run_render_test(
                 servo_out.drift_estimate_ppm,
                 servo_out.buffer_correction_ppm,
                 servo_out.acquiring,
+                servo_out.acquisition_stable_seconds,
                 total_underflow,
                 total_retired,
                 producer.dropped_frames(),
