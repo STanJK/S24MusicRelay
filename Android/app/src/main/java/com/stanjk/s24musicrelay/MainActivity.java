@@ -214,10 +214,32 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         status.setText("Setting UID " + TEST_UID + " volume to " + ratio + "...");
         new Thread(() -> {
             try {
+                int route = ShizukuAudioBridge.getAppDevice(TEST_UID);
+                if (ratio == 0) {
+                    ShizukuAudioBridge.setAppDevice(
+                            TEST_UID,
+                            ShizukuAudioBridge.DEVICE_OUT_SPEAKER,
+                            false);
+                    route = ShizukuAudioBridge.getAppDevice(TEST_UID);
+                    if ((route & ShizukuAudioBridge.DEVICE_OUT_SPEAKER) == 0) {
+                        final int rejectedRoute = route;
+                        runOnUiThread(() ->
+                                status.setText(
+                                        "Refused Set 0: source route is 0x"
+                                                + Integer.toHexString(rejectedRoute)
+                                                + ", not speaker"));
+                        return;
+                    }
+                }
+
                 ShizukuAudioBridge.setAppVolume(TEST_UID, ratio, getPackageName());
                 int actual = ShizukuAudioBridge.getAppVolume(TEST_UID);
+                final int actualRoute = route;
                 runOnUiThread(() ->
-                        status.setText("UID " + TEST_UID + " app volume = " + actual));
+                        status.setText(
+                                "UID " + TEST_UID
+                                        + " route=0x" + Integer.toHexString(actualRoute)
+                                        + " volume=" + actual));
             } catch (Throwable t) {
                 runOnUiThread(() ->
                         status.setText("Shizuku audio error: "
