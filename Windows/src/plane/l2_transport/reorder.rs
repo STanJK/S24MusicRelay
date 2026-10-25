@@ -69,15 +69,16 @@ impl ReorderBoundary {
         self.drain_ready(&mut output);
 
         if self.pending.len() >= MAX_PENDING_PACKETS {
-            if let Some((&first_sequence, first_packet)) =
-                self.pending.first_key_value()
+            if let Some((first_sequence, first_frame_id)) =
+                self.pending
+                    .first_key_value()
+                    .map(|(&sequence, packet)| (sequence, packet.first_frame_id))
             {
                 if first_sequence > self.next_sequence {
                     self.stats.lost_packets +=
                         first_sequence - self.next_sequence;
 
-                    let gap = first_packet
-                        .first_frame_id
+                    let gap = first_frame_id
                         .saturating_sub(self.next_frame_id)
                         as usize;
 
@@ -90,7 +91,7 @@ impl ReorderBoundary {
                     }
 
                     self.next_sequence = first_sequence;
-                    self.next_frame_id = first_packet.first_frame_id;
+                    self.next_frame_id = first_frame_id;
                     self.drain_ready(&mut output);
                 }
             }
