@@ -267,7 +267,7 @@ public final class CaptureService extends Service {
         transportRing = new PcmSpscRing(TRANSPORT_RING_FRAMES, CHANNELS);
         delayLine = new FixedDelayLine(msToFrames(MAX_DELAY_MS), CHANNELS);
 
-        if (pendingUdpHost != null && !pendingUdpHost.isBlank()) {
+        if (pendingUdpHost != null && !pendingUdpHost.trim().isEmpty()) {
             try {
                 udpSender = new UdpPcmSender(
                         pendingUdpHost,
