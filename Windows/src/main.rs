@@ -73,11 +73,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("dual-output-gui requires --sacrificial <default-endpoint-substring>")?;
             let local_device_substring = parse_arg(&args, "--device")
                 .unwrap_or_else(|| "Realtek".to_string());
+            let mic_device_substring = parse_arg(&args, "--mic")
+                .unwrap_or_else(|| "USB_MIC".to_string());
 
             run_dual_output_gui(DualOutputGuiConfig {
                 target,
                 sacrificial_substring,
                 local_device_substring,
+                mic_device_substring,
             })
             .map_err(|error| -> Box<dyn std::error::Error> {
                 error.into()
@@ -139,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  s24relay udp-render [--bind 0.0.0.0:32124] [--device Realtek] [--seconds 30]\n  \
                  s24relay udp-send-test --target <phone-ip>:32124 [--seconds 30] [--tone-hz 440] [--gain 0.15]\n  \
                  s24relay udp-send-live --target <phone-ip>:32124 --sacrificial <substring> [--seconds 30] [--gain 1.0]\n  \
-                 s24relay dual-output-gui --target <phone-ip>:32124 --sacrificial <substring> [--device Realtek]\n  \
+                 s24relay dual-output-gui --target <phone-ip>:32124 --sacrificial <substring> [--device Realtek] [--mic USB_MIC]\n  \
                  s24relay chirp-align --target <phone-ip>:32124 [--device Realtek] [--mic USB_MIC]"
             );
             Ok(())
