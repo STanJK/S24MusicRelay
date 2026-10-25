@@ -839,7 +839,7 @@ impl eframe::App for DualOutputApp {
 
             let running = self.worker.is_some();
 
-            if let Some(worker) = &self.worker {
+            if running {
                 let volume = ui.add(
                     egui::Slider::new(
                         &mut self.local_volume_percent,
@@ -849,9 +849,11 @@ impl eframe::App for DualOutputApp {
                     .suffix("%"),
                 );
                 if volume.changed() {
-                    worker.controls.set_local_gain(
-                        self.local_volume_percent / 100.0,
-                    );
+                    if let Some(worker) = self.worker.as_ref() {
+                        worker.controls.set_local_gain(
+                            self.local_volume_percent / 100.0,
+                        );
+                    }
                 }
 
                 let center = ui.add(
@@ -924,7 +926,9 @@ impl eframe::App for DualOutputApp {
 
                 ui.add_space(8.0);
                 if ui.button("Stop").clicked() {
-                    worker.stop();
+                    if let Some(worker) = self.worker.as_ref() {
+                        worker.stop();
+                    }
                 }
             }
 
