@@ -177,8 +177,11 @@ public final class CaptureService extends Service {
         audioDeviceCallback = new AudioDeviceCallback() {
             @Override
             public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
-                pinSourceAppToSpeaker("device-added");
-                refreshRenderDevices("device-added");
+                if (pinSourceAppToSpeaker("device-added")) {
+                    refreshRenderDevices("device-added");
+                } else {
+                    Log.e(TAG, "[route/usb] device-added blocked: source UID is not pinned to speaker");
+                }
             }
 
             @Override
@@ -294,7 +297,9 @@ public final class CaptureService extends Service {
         // Own the source-app route before any USB sink is created. On Samsung,
         // allowing the source UID to migrate to USB makes setAppVolume(0)
         // silence the playback-capture tap as well.
-        pinSourceAppToSpeaker("capture-start");
+        if (!pinSourceAppToSpeaker("capture-start")) {
+            throw new IllegalStateException("source app could not be pinned to built-in speaker");
+        }
 
         AudioDeviceInfo speaker = findBuiltinSpeaker();
         if (speaker == null) {
@@ -467,20 +472,24 @@ public final class CaptureService extends Service {
         }
     }
 
-    private void pinSourceAppToSpeaker(String reason) {
+    private boolean pinSourceAppToSpeaker(String reason) {
         try {
             ShizukuAudioBridge.setAppDevice(
                     SOURCE_UID,
                     ShizukuAudioBridge.DEVICE_OUT_SPEAKER,
                     false);
             int actual = ShizukuAudioBridge.getAppDevice(SOURCE_UID);
+            boolean pinned =
+                    (actual & ShizukuAudioBridge.DEVICE_OUT_SPEAKER) != 0;
             Log.i(TAG,
                     "[source-route] " + reason
                             + " uid=" + SOURCE_UID
                             + " requested=0x"
                             + Integer.toHexString(ShizukuAudioBridge.DEVICE_OUT_SPEAKER)
                             + " actual=0x"
-                            + Integer.toHexString(actual));
+                            + Integer.toHexString(actual)
+                            + " pinned=" + pinned);
+            return pinned;
         } catch (Throwable t) {
             Log.e(TAG,
                     "[source-route] " + reason
@@ -488,6 +497,7 @@ public final class CaptureService extends Service {
                             + t.getClass().getSimpleName()
                             + ": "
                             + t.getMessage());
+            return false;
         }
     }
 
