@@ -23,8 +23,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
 
     private TextView status;
     private TextView meter;
-    private TextView speakerDelayLabel;
-    private TextView usbDelayLabel;
+    private TextView delayLabel;
     private TextView shizukuStatus;
     private MediaProjectionManager projectionManager;
 
@@ -44,8 +43,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        projectionManager =
-                (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        projectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -61,55 +59,27 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         shizukuStatus.setTextSize(16);
         shizukuStatus.setPadding(0, 20, 0, 8);
 
-        Button forceSpeaker = new Button(this);
-        forceSpeaker.setText("Force source -> speaker");
-        forceSpeaker.setOnClickListener(v -> forceSourceToSpeaker());
-
         Button setZero = new Button(this);
-        setZero.setText("Set source app 0");
+        setZero.setText("Set 0");
         setZero.setOnClickListener(v -> setTestAppVolume(0));
 
         Button setHundred = new Button(this);
-        setHundred.setText("Set source app 100");
+        setHundred.setText("Set 100");
         setHundred.setOnClickListener(v -> setTestAppVolume(100));
 
-        speakerDelayLabel = new TextView(this);
-        speakerDelayLabel.setPadding(0, 24, 0, 8);
-        speakerDelayLabel.setTextSize(16);
+        delayLabel = new TextView(this);
+        delayLabel.setPadding(0, 24, 0, 8);
+        delayLabel.setTextSize(16);
 
-        SeekBar speakerDelay = new SeekBar(this);
-        speakerDelay.setMax(500);
-        speakerDelay.setProgress(CaptureService.getConfiguredSpeakerDelayMs());
-        updateSpeakerDelayLabel(speakerDelay.getProgress());
-        speakerDelay.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        SeekBar delay = new SeekBar(this);
+        delay.setMax(500);
+        delay.setProgress(CaptureService.getConfiguredDelayMs());
+        updateDelayLabel(delay.getProgress());
+        delay.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                CaptureService.setConfiguredSpeakerDelayMs(progress);
-                updateSpeakerDelayLabel(progress);
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-            }
-        });
-
-        usbDelayLabel = new TextView(this);
-        usbDelayLabel.setPadding(0, 24, 0, 8);
-        usbDelayLabel.setTextSize(16);
-
-        SeekBar usbDelay = new SeekBar(this);
-        usbDelay.setMax(500);
-        usbDelay.setProgress(CaptureService.getConfiguredUsbDelayMs());
-        updateUsbDelayLabel(usbDelay.getProgress());
-        usbDelay.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                CaptureService.setConfiguredUsbDelayMs(progress);
-                updateUsbDelayLabel(progress);
+                CaptureService.setConfiguredDelayMs(progress);
+                updateDelayLabel(progress);
             }
 
             @Override
@@ -128,7 +98,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         meter.setTextIsSelectable(true);
 
         Button start = new Button(this);
-        start.setText("Start capture + speaker + USB");
+        start.setText("Start capture + local rerender");
         start.setOnClickListener(v -> beginCapture());
 
         Button stop = new Button(this);
@@ -140,13 +110,10 @@ public final class MainActivity extends Activity implements CaptureService.Meter
 
         root.addView(status);
         root.addView(shizukuStatus);
-        root.addView(forceSpeaker);
         root.addView(setZero);
         root.addView(setHundred);
-        root.addView(speakerDelayLabel);
-        root.addView(speakerDelay);
-        root.addView(usbDelayLabel);
-        root.addView(usbDelay);
+        root.addView(delayLabel);
+        root.addView(delay);
         root.addView(meter);
         root.addView(start);
         root.addView(stop);
@@ -209,37 +176,6 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         });
     }
 
-    private void forceSourceToSpeaker() {
-        if (!Shizuku.pingBinder()
-                || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            ensureShizukuPermission();
-            return;
-        }
-
-        status.setText("Forcing UID " + TEST_UID + " -> speaker...");
-        new Thread(() -> {
-            try {
-                ShizukuAudioBridge.setAppDevice(
-                        TEST_UID,
-                        ShizukuAudioBridge.DEVICE_OUT_SPEAKER,
-                        false);
-                int actual = ShizukuAudioBridge.getAppDevice(TEST_UID);
-                runOnUiThread(() ->
-                        status.setText(
-                                "UID " + TEST_UID
-                                        + " forced speaker; route=0x"
-                                        + Integer.toHexString(actual)));
-            } catch (Throwable t) {
-                runOnUiThread(() ->
-                        status.setText(
-                                "Source route error: "
-                                        + t.getClass().getSimpleName()
-                                        + ": "
-                                        + t.getMessage()));
-            }
-        }, "Shizuku-Route").start();
-    }
-
     private void setTestAppVolume(int ratio) {
         if (!Shizuku.pingBinder()
                 || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
@@ -250,32 +186,10 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         status.setText("Setting UID " + TEST_UID + " volume to " + ratio + "...");
         new Thread(() -> {
             try {
-                int route = ShizukuAudioBridge.getAppDevice(TEST_UID);
-                if (ratio == 0) {
-                    ShizukuAudioBridge.setAppDevice(
-                            TEST_UID,
-                            ShizukuAudioBridge.DEVICE_OUT_SPEAKER,
-                            false);
-                    route = ShizukuAudioBridge.getAppDevice(TEST_UID);
-                    if ((route & ShizukuAudioBridge.DEVICE_OUT_SPEAKER) == 0) {
-                        final int rejectedRoute = route;
-                        runOnUiThread(() ->
-                                status.setText(
-                                        "Refused Set 0: source route is 0x"
-                                                + Integer.toHexString(rejectedRoute)
-                                                + ", not speaker"));
-                        return;
-                    }
-                }
-
                 ShizukuAudioBridge.setAppVolume(TEST_UID, ratio, getPackageName());
                 int actual = ShizukuAudioBridge.getAppVolume(TEST_UID);
-                final int actualRoute = route;
                 runOnUiThread(() ->
-                        status.setText(
-                                "UID " + TEST_UID
-                                        + " route=0x" + Integer.toHexString(actualRoute)
-                                        + " volume=" + actual));
+                        status.setText("UID " + TEST_UID + " app volume = " + actual));
             } catch (Throwable t) {
                 runOnUiThread(() ->
                         status.setText("Shizuku audio error: "
@@ -286,34 +200,23 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         }, "Shizuku-Audio").start();
     }
 
-    private void updateSpeakerDelayLabel(int delayMs) {
-        speakerDelayLabel.setText("Speaker presentation delay: " + delayMs + " ms");
-    }
-
-    private void updateUsbDelayLabel(int delayMs) {
-        usbDelayLabel.setText("USB presentation delay: " + delayMs + " ms");
+    private void updateDelayLabel(int delayMs) {
+        delayLabel.setText("Local presentation delay: " + delayMs + " ms");
     }
 
     private void beginCapture() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
             return;
         }
-        startActivityForResult(
-                projectionManager.createScreenCaptureIntent(),
-                REQ_PROJECTION);
+        startActivityForResult(projectionManager.createScreenCaptureIntent(), REQ_PROJECTION);
     }
 
     @Override
-    public void onRequestPermissionsResult(
-            int requestCode,
-            String[] permissions,
-            int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_AUDIO
-                && grantResults.length > 0
-                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+        if (requestCode == REQ_AUDIO && grantResults.length > 0 &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             beginCapture();
         } else if (requestCode == REQ_AUDIO) {
             status.setText("RECORD_AUDIO denied");
@@ -335,7 +238,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         svc.putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode);
         svc.putExtra(CaptureService.EXTRA_RESULT_DATA, data);
         startForegroundService(svc);
-        status.setText("Starting capture + speaker + USB...");
+        status.setText("Starting capture + local rerender...");
     }
 
     @Override
@@ -353,57 +256,41 @@ public final class MainActivity extends Activity implements CaptureService.Meter
 
     @Override
     public void onMeter(CaptureService.MeterSnapshot snapshot) {
-        runOnUiThread(() -> meter.setText(String.format(
-                "Capture\n"
-                        + "  frames: %,d\n"
-                        + "  peak: %.6f\n"
-                        + "  RMS:  %.6f\n"
-                        + "  PCM[0..7]: %s\n\n"
-                        + "Speaker sink\n"
-                        + "  delay: %d ms\n"
-                        + "  ring: %d frames / %.2f ms\n"
-                        + "  high-water: %d\n"
-                        + "  rendered: %,d\n"
-                        + "  underflow: %,d\n"
-                        + "  dropped: %,d\n\n"
-                        + "USB sink\n"
-                        + "  active: %s\n"
-                        + "  delay: %d ms\n"
-                        + "  ring: %d frames / %.2f ms\n"
-                        + "  high-water: %d\n"
-                        + "  rendered: %,d\n"
-                        + "  underflow: %,d\n"
-                        + "  dropped: %,d\n\n"
-                        + "UDP\n"
-                        + "  packets: %,d\n"
-                        + "  last seq/frame: %d / %d\n"
-                        + "  queue dropped: %,d frames",
-                snapshot.capturedFrames,
-                snapshot.peak,
-                snapshot.rms,
-                snapshot.samples,
-
-                snapshot.speakerDelayMs,
-                snapshot.speakerRingFrames,
-                snapshot.speakerRingMs,
-                snapshot.speakerRingHighWaterFrames,
-                snapshot.speakerRenderedFrames,
-                snapshot.speakerUnderflowFrames,
-                snapshot.speakerDroppedFrames,
-
-                snapshot.usbActive,
-                snapshot.usbDelayMs,
-                snapshot.usbRingFrames,
-                snapshot.usbRingMs,
-                snapshot.usbRingHighWaterFrames,
-                snapshot.usbRenderedFrames,
-                snapshot.usbUnderflowFrames,
-                snapshot.usbDroppedFrames,
-
-                snapshot.udpPacketsSent,
-                snapshot.udpLastSequence,
-                snapshot.udpLastFirstFrame,
-                snapshot.udpQueueDroppedFrames)));
+        runOnUiThread(() -> {
+            meter.setText(String.format(
+                    "Capture\n" +
+                            "  frames: %,d\n" +
+                            "  peak: %.6f\n" +
+                            "  RMS:  %.6f\n" +
+                            "  PCM[0..7]: %s\n\n" +
+                            "Transport ring\n" +
+                            "  occupancy: %d frames / %.2f ms\n" +
+                            "  high-water: %d frames\n" +
+                            "  dropped: %,d frames\n\n" +
+                            "Presentation\n" +
+                            "  configured delay: %d ms\n" +
+                            "  rendered: %,d frames\n" +
+                            "  underflow: %,d frames\n\n" +
+                            "UDP\n" +
+                            "  packets: %,d\n" +
+                            "  last seq/frame: %d / %d\n" +
+                            "  queue dropped: %,d frames",
+                    snapshot.capturedFrames,
+                    snapshot.peak,
+                    snapshot.rms,
+                    snapshot.samples,
+                    snapshot.ringFrames,
+                    snapshot.ringMs,
+                    snapshot.ringHighWaterFrames,
+                    snapshot.droppedFrames,
+                    snapshot.configuredDelayMs,
+                    snapshot.renderedFrames,
+                    snapshot.underflowFrames,
+                    snapshot.udpPacketsSent,
+                    snapshot.udpLastSequence,
+                    snapshot.udpLastFirstFrame,
+                    snapshot.udpQueueDroppedFrames));
+        });
     }
 
     @Override
