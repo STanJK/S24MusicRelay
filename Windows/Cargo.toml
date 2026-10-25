@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[dependencies]
+bumble-codecs = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+
 [[bin]]
 name = "s24relay"
 path = "src/main.rs"
