@@ -35,6 +35,8 @@ public final class CaptureService extends Service {
     private static final String CHANNEL_ID = "capture";
     private static final int NOTIFICATION_ID = 24;
 
+    private static final int SOURCE_UID = 10341;
+
     private static final int SAMPLE_RATE = 48_000;
     private static final int CHANNELS = 2;
     private static final int RENDER_BLOCK_FRAMES = 480;      // 10 ms
@@ -175,11 +177,13 @@ public final class CaptureService extends Service {
         audioDeviceCallback = new AudioDeviceCallback() {
             @Override
             public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+                pinSourceAppToSpeaker("device-added");
                 refreshRenderDevices("device-added");
             }
 
             @Override
             public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+                pinSourceAppToSpeaker("device-removed");
                 refreshRenderDevices("device-removed");
             }
         };
@@ -286,6 +290,11 @@ public final class CaptureService extends Service {
         if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
             throw new IllegalStateException("AudioRecord not initialized");
         }
+
+        // Own the source-app route before any USB sink is created. On Samsung,
+        // allowing the source UID to migrate to USB makes setAppVolume(0)
+        // silence the playback-capture tap as well.
+        pinSourceAppToSpeaker("capture-start");
 
         AudioDeviceInfo speaker = findBuiltinSpeaker();
         if (speaker == null) {
@@ -455,6 +464,30 @@ public final class CaptureService extends Service {
 
             MeterListener listener = meterListener;
             if (listener != null) listener.onMeter(snapshot);
+        }
+    }
+
+    private void pinSourceAppToSpeaker(String reason) {
+        try {
+            ShizukuAudioBridge.setAppDevice(
+                    SOURCE_UID,
+                    ShizukuAudioBridge.DEVICE_OUT_SPEAKER,
+                    false);
+            int actual = ShizukuAudioBridge.getAppDevice(SOURCE_UID);
+            Log.i(TAG,
+                    "[source-route] " + reason
+                            + " uid=" + SOURCE_UID
+                            + " requested=0x"
+                            + Integer.toHexString(ShizukuAudioBridge.DEVICE_OUT_SPEAKER)
+                            + " actual=0x"
+                            + Integer.toHexString(actual));
+        } catch (Throwable t) {
+            Log.e(TAG,
+                    "[source-route] " + reason
+                            + " failed: "
+                            + t.getClass().getSimpleName()
+                            + ": "
+                            + t.getMessage());
         }
     }
 
