@@ -9,7 +9,6 @@ import android.media.projection.MediaProjectionManager;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -26,8 +25,6 @@ public final class MainActivity extends Activity implements CaptureService.Meter
     private TextView meter;
     private TextView delayLabel;
     private TextView shizukuStatus;
-    private EditText udpHost;
-    private EditText udpPort;
     private MediaProjectionManager projectionManager;
 
     private final Shizuku.OnBinderReceivedListener binderReceivedListener =
@@ -69,16 +66,6 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         Button setHundred = new Button(this);
         setHundred.setText("Set 100");
         setHundred.setOnClickListener(v -> setTestAppVolume(100));
-
-        udpHost = new EditText(this);
-        udpHost.setHint("PC IPv4 for UDP (blank = disabled)");
-        udpHost.setSingleLine(true);
-
-        udpPort = new EditText(this);
-        udpPort.setHint("UDP port");
-        udpPort.setText("32124");
-        udpPort.setSingleLine(true);
-        udpPort.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
 
         delayLabel = new TextView(this);
         delayLabel.setPadding(0, 24, 0, 8);
@@ -125,8 +112,6 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         root.addView(shizukuStatus);
         root.addView(setZero);
         root.addView(setHundred);
-        root.addView(udpHost);
-        root.addView(udpPort);
         root.addView(delayLabel);
         root.addView(delay);
         root.addView(meter);
@@ -252,19 +237,6 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         svc.setAction(CaptureService.ACTION_START);
         svc.putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode);
         svc.putExtra(CaptureService.EXTRA_RESULT_DATA, data);
-
-        String host = udpHost.getText().toString().trim();
-        if (!host.isEmpty()) {
-            svc.putExtra(CaptureService.EXTRA_UDP_HOST, host);
-
-            int port = UdpPcmSender.DEFAULT_PORT;
-            try {
-                port = Integer.parseInt(udpPort.getText().toString().trim());
-            } catch (Throwable ignored) {
-            }
-            svc.putExtra(CaptureService.EXTRA_UDP_PORT, port);
-        }
-
         startForegroundService(svc);
         status.setText("Starting capture + local rerender...");
     }
