@@ -34,15 +34,16 @@ impl Default for ClockServoConfig {
             target_fill_frames: 1_920.0,
             occupancy_filter_tau_seconds: 5.0,
 
-            // 3 ms at 48 kHz. Wide enough that a +/-500 ppm source can settle
-            // under P-only acquisition, but narrow enough to reject the large
-            // startup transient seen in HIL.
-            acquisition_error_frames: 144.0,
+            // 8 ms at 48 kHz. Acquisition is P-only, so a constant source-clock
+            // mismatch has a deliberate steady-state position error before the
+            // TRACK integrator takes over. The slope gate rejects moving
+            // startup transients even though this position window is wider.
+            acquisition_error_frames: 384.0,
             acquisition_max_slope_frames_per_second: 20.0,
             acquisition_dwell_seconds: 1.0,
 
             buffer_kp_ppm_per_frame: 2.0,
-            max_abs_buffer_ppm: 500.0,
+            max_abs_buffer_ppm: 1_000.0,
 
             drift_ki_ppm_per_frame_second: 0.1,
             max_abs_drift_ppm: 1_500.0,
@@ -242,7 +243,7 @@ mod tests {
             assert!(out.acquiring);
             assert_eq!(out.drift_estimate_ppm, 0.0);
 
-            if out.fill_error_frames.abs() <= 144.0 {
+            if out.fill_error_frames.abs() <= 384.0 {
                 assert!(
                     out.filtered_fill_slope_frames_per_second.abs() > 20.0,
                     "moving startup transient must not satisfy acquisition dwell"
