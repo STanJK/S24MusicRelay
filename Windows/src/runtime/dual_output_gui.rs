@@ -25,6 +25,10 @@ use bumble_codecs::lc3::{
 };
 use eframe::egui;
 
+use super::chirp_align::{
+    measure_chirp_alignment, ChirpAlignConfig, ChirpAlignment,
+};
+
 use crate::{
     plane::{
         l1_media::source::process_loopback::ProcessLoopbackSource,
@@ -49,6 +53,7 @@ pub struct DualOutputGuiConfig {
     pub target: String,
     pub sacrificial_substring: String,
     pub local_device_substring: String,
+    pub mic_device_substring: String,
 }
 
 #[derive(Clone)]
@@ -665,8 +670,16 @@ struct SessionWorker {
 }
 
 impl SessionWorker {
-    fn start(config: DualOutputGuiConfig) -> Self {
+    fn start(
+        config: DualOutputGuiConfig,
+        local_volume_percent: f32,
+        s24_delay_ms: u32,
+        local_delay_ms: u32,
+    ) -> Self {
         let controls = SharedControls::new();
+        controls.set_local_gain(local_volume_percent / 100.0);
+        controls.set_s24_delay_ms(s24_delay_ms);
+        controls.set_local_delay_ms(local_delay_ms);
         let thread_controls = controls.clone();
         let (result_tx, result_rx) = mpsc::channel();
 
@@ -706,26 +719,78 @@ impl SessionWorker {
     }
 }
 
+struct CalibrationWorker {
+    result_rx: Receiver<Result<ChirpAlignment, String>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl CalibrationWorker {
+    fn start(config: &DualOutputGuiConfig) -> Self {
+        let chirp_config = ChirpAlignConfig {
+            target: config.target.clone(),
+            local_device_substring: config.local_device_substring.clone(),
+            mic_device_substring: config.mic_device_substring.clone(),
+        };
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let join = thread::Builder::new()
+            .name("s24-gui-calibration".into())
+            .spawn(move || {
+                let result = measure_chirp_alignment(chirp_config)
+                    .map_err(|error| error.to_string());
+                let _ = result_tx.send(result);
+            })
+            .expect("failed to spawn chirp calibration worker");
+
+        Self {
+            result_rx,
+            join: Some(join),
+        }
+    }
+
+    fn try_result(&self) -> Option<Result<ChirpAlignment, String>> {
+        match self.result_rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(
+                "calibration worker exited without a result".into(),
+            )),
+        }
+    }
+
+    fn join(&mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 struct DualOutputApp {
+    config: DualOutputGuiConfig,
     worker: Option<SessionWorker>,
+    calibration: Option<CalibrationWorker>,
     local_volume_percent: f32,
     s24_delay_ms: u32,
     local_delay_ms: u32,
+    last_calibration: Option<ChirpAlignment>,
     last_error: Option<String>,
 }
 
 impl DualOutputApp {
     fn new(config: DualOutputGuiConfig) -> Self {
         Self {
-            worker: Some(SessionWorker::start(config)),
+            config,
+            worker: None,
+            calibration: None,
             local_volume_percent: 100.0,
             s24_delay_ms: 0,
             local_delay_ms: 0,
+            last_calibration: None,
             last_error: None,
         }
     }
 
-    fn poll(&mut self) {
+    fn poll_session(&mut self) {
         let Some(result) = self
             .worker
             .as_ref()
@@ -741,6 +806,76 @@ impl DualOutputApp {
             self.last_error = Some(error);
         }
     }
+
+    fn poll_calibration(&mut self) {
+        let Some(result) = self
+            .calibration
+            .as_ref()
+            .and_then(CalibrationWorker::try_result)
+        else {
+            return;
+        };
+
+        let mut calibration = self.calibration.take().unwrap();
+        calibration.join();
+
+        match result {
+            Ok(alignment) => {
+                self.local_delay_ms = alignment
+                    .recommended_realtek_delay_ms
+                    .round()
+                    .clamp(0.0, MAX_DELAY_MS as f64)
+                    as u32;
+                self.s24_delay_ms = alignment
+                    .recommended_s24_delay_ms
+                    .round()
+                    .clamp(0.0, MAX_DELAY_MS as f64)
+                    as u32;
+                self.last_calibration = Some(alignment);
+                self.last_error = None;
+
+                println!(
+                    "[dual][calibrate] applied Realtek={}ms S24={}ms delta={:+.2}ms",
+                    self.local_delay_ms,
+                    self.s24_delay_ms,
+                    alignment.delta_s24_minus_realtek_ms,
+                );
+            }
+            Err(error) => {
+                eprintln!("[dual][calibrate] failed: {error}");
+                self.last_error = Some(error);
+            }
+        }
+    }
+
+    fn start_session(&mut self) {
+        if self.worker.is_some() || self.calibration.is_some() {
+            return;
+        }
+
+        self.last_error = None;
+        self.worker = Some(SessionWorker::start(
+            self.config.clone(),
+            self.local_volume_percent,
+            self.s24_delay_ms,
+            self.local_delay_ms,
+        ));
+    }
+
+    fn stop_session(&self) {
+        if let Some(worker) = &self.worker {
+            worker.stop();
+        }
+    }
+
+    fn start_calibration(&mut self) {
+        if self.worker.is_some() || self.calibration.is_some() {
+            return;
+        }
+
+        self.last_error = None;
+        self.calibration = Some(CalibrationWorker::start(&self.config));
+    }
 }
 
 impl Drop for DualOutputApp {
@@ -748,6 +883,9 @@ impl Drop for DualOutputApp {
         if let Some(mut worker) = self.worker.take() {
             worker.stop();
             worker.join();
+        }
+        if let Some(mut calibration) = self.calibration.take() {
+            calibration.join();
         }
     }
 }
@@ -758,70 +896,126 @@ impl eframe::App for DualOutputApp {
         ui: &mut egui::Ui,
         _frame: &mut eframe::Frame,
     ) {
-        self.poll();
+        self.poll_session();
+        self.poll_calibration();
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            ui.heading("S24MusicRelay · Manual alignment");
+            ui.heading("S24MusicRelay · Dual output");
             ui.add_space(8.0);
 
             let running = self.worker.is_some();
+            let calibrating = self.calibration.is_some();
 
-            if let Some(worker) = &self.worker {
-                let volume = ui.add(
-                    egui::Slider::new(
-                        &mut self.local_volume_percent,
-                        0.0..=200.0,
-                    )
-                    .text("Realtek volume")
-                    .suffix("%"),
-                );
-                if volume.changed() {
+            let volume = ui.add_enabled(
+                !calibrating,
+                egui::Slider::new(
+                    &mut self.local_volume_percent,
+                    0.0..=200.0,
+                )
+                .text("Realtek volume")
+                .suffix("%"),
+            );
+            if volume.changed() {
+                if let Some(worker) = &self.worker {
                     worker.controls.set_local_gain(
                         self.local_volume_percent / 100.0,
                     );
                 }
+            }
 
-                let s24_delay = ui.add(
-                    egui::Slider::new(
-                        &mut self.s24_delay_ms,
-                        0..=MAX_DELAY_MS,
-                    )
-                    .text("S24 delay")
-                    .suffix(" ms"),
-                );
-                if s24_delay.changed() {
+            let s24_delay = ui.add_enabled(
+                !calibrating,
+                egui::Slider::new(
+                    &mut self.s24_delay_ms,
+                    0..=MAX_DELAY_MS,
+                )
+                .text("S24 delay")
+                .suffix(" ms"),
+            );
+            if s24_delay.changed() {
+                if let Some(worker) = &self.worker {
                     worker.controls.set_s24_delay_ms(self.s24_delay_ms);
-                }
-
-                let local_delay = ui.add(
-                    egui::Slider::new(
-                        &mut self.local_delay_ms,
-                        0..=MAX_DELAY_MS,
-                    )
-                    .text("Realtek delay")
-                    .suffix(" ms"),
-                );
-                if local_delay.changed() {
-                    worker.controls.set_local_delay_ms(self.local_delay_ms);
-                }
-
-                ui.add_space(8.0);
-                if ui.button("Stop").clicked() {
-                    worker.stop();
                 }
             }
 
-            ui.separator();
-            ui.label(if running {
-                "Running · stdout telemetry remains enabled"
-            } else {
-                "Stopped"
+            let local_delay = ui.add_enabled(
+                !calibrating,
+                egui::Slider::new(
+                    &mut self.local_delay_ms,
+                    0..=MAX_DELAY_MS,
+                )
+                .text("Realtek delay")
+                .suffix(" ms"),
+            );
+            if local_delay.changed() {
+                if let Some(worker) = &self.worker {
+                    worker.controls.set_local_delay_ms(self.local_delay_ms);
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !running && !calibrating,
+                        egui::Button::new("Start"),
+                    )
+                    .clicked()
+                {
+                    self.start_session();
+                }
+
+                if ui
+                    .add_enabled(
+                        running,
+                        egui::Button::new("Stop"),
+                    )
+                    .clicked()
+                {
+                    self.stop_session();
+                }
+
+                if ui
+                    .add_enabled(
+                        !running && !calibrating,
+                        egui::Button::new("Calibrate"),
+                    )
+                    .clicked()
+                {
+                    self.start_calibration();
+                }
             });
 
+            ui.add_space(8.0);
+            ui.separator();
+
+            if calibrating {
+                ui.label(
+                    "Calibrating · Realtek/S24 alternating chirps ×5 · USB_MIC",
+                );
+            } else if running {
+                ui.label("Running · stdout telemetry remains enabled");
+            } else {
+                ui.label("Idle");
+            }
+
+            if let Some(alignment) = self.last_calibration {
+                ui.add_space(6.0);
+                ui.monospace(format!(
+                    "Calibration: Δ(S24-Realtek)={:+.2} ms · applied Realtek={} ms / S24={} ms · valid={}/{}",
+                    alignment.delta_s24_minus_realtek_ms,
+                    self.local_delay_ms,
+                    self.s24_delay_ms,
+                    alignment.valid_realtek_chirps,
+                    alignment.valid_s24_chirps,
+                ));
+            }
+
             if let Some(error) = &self.last_error {
+                ui.add_space(6.0);
                 ui.colored_label(
                     ui.visuals().error_fg_color,
-                    format!("Session error: {error}"),
+                    format!("Error: {error}"),
                 );
             }
         });
@@ -835,8 +1029,8 @@ pub fn run_dual_output_gui(
 ) -> Result<(), String> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([430.0, 210.0])
-            .with_min_inner_size([380.0, 180.0])
+            .with_inner_size([560.0, 280.0])
+            .with_min_inner_size([520.0, 240.0])
             .with_resizable(false),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
