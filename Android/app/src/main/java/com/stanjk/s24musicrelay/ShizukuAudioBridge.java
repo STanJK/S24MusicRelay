@@ -8,46 +8,10 @@ import rikka.shizuku.SystemServiceHelper;
 
 final class ShizukuAudioBridge {
     private static final String DESCRIPTOR = "android.media.IAudioService";
-    private static final int TX_SET_APP_DEVICE = 291;
-    private static final int TX_GET_APP_DEVICE = 292;
     private static final int TX_SET_APP_VOLUME = 293;
     private static final int TX_GET_APP_VOLUME = 294;
 
-    // android.media.AudioSystem.DEVICE_OUT_SPEAKER
-    static final int DEVICE_OUT_SPEAKER = 0x2;
-
     private ShizukuAudioBridge() {}
-
-    static int getAppDevice(int uid) throws Exception {
-        Parcel data = Parcel.obtain();
-        Parcel reply = Parcel.obtain();
-        try {
-            data.writeInterfaceToken(DESCRIPTOR);
-            data.writeInt(uid);
-            binder().transact(TX_GET_APP_DEVICE, data, reply, 0);
-            reply.readException();
-            return reply.readInt();
-        } finally {
-            reply.recycle();
-            data.recycle();
-        }
-    }
-
-    static void setAppDevice(int uid, int device, boolean showNotification) throws Exception {
-        Parcel data = Parcel.obtain();
-        Parcel reply = Parcel.obtain();
-        try {
-            data.writeInterfaceToken(DESCRIPTOR);
-            data.writeInt(uid);
-            data.writeInt(device);
-            data.writeBoolean(showNotification);
-            binder().transact(TX_SET_APP_DEVICE, data, reply, 0);
-            reply.readException();
-        } finally {
-            reply.recycle();
-            data.recycle();
-        }
-    }
 
     static int getAppVolume(int uid) throws Exception {
         Parcel data = Parcel.obtain();
