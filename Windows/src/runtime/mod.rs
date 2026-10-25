@@ -1,6 +1,8 @@
 //! Process/runtime ownership.
 
 #[cfg(windows)]
+pub mod chirp_align;
+#[cfg(windows)]
 pub mod dual_output_gui;
 pub mod render_test;
 pub mod telemetry;
