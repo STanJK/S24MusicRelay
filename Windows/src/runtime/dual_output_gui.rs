@@ -43,8 +43,6 @@ const LOCAL_QUEUE_BLOCKS: usize = 16;
 const LOCAL_STARTUP_CUSHION_FRAMES: usize = 1_920;
 const MAX_DELAY_MS: u32 = 500;
 const GUI_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
-const SWING_HALF_PERIOD: Duration = Duration::from_secs(2);
-const DEFAULT_SWING_MS: u32 = 80;
 
 #[derive(Clone, Debug)]
 pub struct DualOutputGuiConfig {
@@ -99,23 +97,6 @@ impl SharedControls {
     fn set_local_delay_ms(&self, value: u32) {
         self.local_delay_ms
             .store(value.min(MAX_DELAY_MS), Ordering::Relaxed);
-    }
-
-    // Signed relative delay:
-    //   positive => S24 is intentionally later
-    //   negative => Realtek is intentionally later
-    fn set_relative_delay_ms(&self, relative_ms: i32) {
-        let limited = relative_ms.clamp(
-            -(MAX_DELAY_MS as i32),
-            MAX_DELAY_MS as i32,
-        );
-        if limited >= 0 {
-            self.set_s24_delay_ms(limited as u32);
-            self.set_local_delay_ms(0);
-        } else {
-            self.set_s24_delay_ms(0);
-            self.set_local_delay_ms((-limited) as u32);
-        }
     }
 
     fn request_stop(&self) {
@@ -728,11 +709,8 @@ impl SessionWorker {
 struct DualOutputApp {
     worker: Option<SessionWorker>,
     local_volume_percent: f32,
-    relative_center_ms: i32,
-    swing_ms: u32,
-    swing_enabled: bool,
-    swing_phase_b: bool,
-    last_swing_switch: Instant,
+    s24_delay_ms: u32,
+    local_delay_ms: u32,
     last_error: Option<String>,
 }
 
@@ -741,11 +719,8 @@ impl DualOutputApp {
         Self {
             worker: Some(SessionWorker::start(config)),
             local_volume_percent: 100.0,
-            relative_center_ms: 0,
-            swing_ms: DEFAULT_SWING_MS,
-            swing_enabled: false,
-            swing_phase_b: false,
-            last_swing_switch: Instant::now(),
+            s24_delay_ms: 0,
+            local_delay_ms: 0,
             last_error: None,
         }
     }
@@ -766,53 +741,6 @@ impl DualOutputApp {
             self.last_error = Some(error);
         }
     }
-
-    fn phase_relative_ms(&self, phase_b: bool) -> i32 {
-        let swing = self.swing_ms as i32;
-        let value = if phase_b {
-            self.relative_center_ms.saturating_add(swing)
-        } else {
-            self.relative_center_ms.saturating_sub(swing)
-        };
-        value.clamp(-(MAX_DELAY_MS as i32), MAX_DELAY_MS as i32)
-    }
-
-    fn active_relative_ms(&self) -> i32 {
-        if self.swing_enabled {
-            self.phase_relative_ms(self.swing_phase_b)
-        } else {
-            self.relative_center_ms
-                .clamp(-(MAX_DELAY_MS as i32), MAX_DELAY_MS as i32)
-        }
-    }
-
-    fn apply_alignment(&self) {
-        if let Some(worker) = &self.worker {
-            worker
-                .controls
-                .set_relative_delay_ms(self.active_relative_ms());
-        }
-    }
-
-    fn update_swing(&mut self) {
-        if !self.swing_enabled || self.worker.is_none() {
-            return;
-        }
-
-        if self.last_swing_switch.elapsed() >= SWING_HALF_PERIOD {
-            self.swing_phase_b = !self.swing_phase_b;
-            self.last_swing_switch = Instant::now();
-            self.apply_alignment();
-        }
-    }
-
-    fn choose_phase(&mut self, phase_b: bool) {
-        self.relative_center_ms = self.phase_relative_ms(phase_b);
-        self.swing_ms = (self.swing_ms / 2).max(1);
-        self.swing_phase_b = false;
-        self.last_swing_switch = Instant::now();
-        self.apply_alignment();
-    }
 }
 
 impl Drop for DualOutputApp {
@@ -831,7 +759,6 @@ impl eframe::App for DualOutputApp {
         _frame: &mut eframe::Frame,
     ) {
         self.poll();
-        self.update_swing();
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             ui.heading("S24MusicRelay · Manual alignment");
@@ -839,7 +766,7 @@ impl eframe::App for DualOutputApp {
 
             let running = self.worker.is_some();
 
-            if running {
+            if let Some(worker) = &self.worker {
                 let volume = ui.add(
                     egui::Slider::new(
                         &mut self.local_volume_percent,
@@ -849,86 +776,38 @@ impl eframe::App for DualOutputApp {
                     .suffix("%"),
                 );
                 if volume.changed() {
-                    if let Some(worker) = self.worker.as_ref() {
-                        worker.controls.set_local_gain(
-                            self.local_volume_percent / 100.0,
-                        );
-                    }
+                    worker.controls.set_local_gain(
+                        self.local_volume_percent / 100.0,
+                    );
                 }
 
-                let center = ui.add(
+                let s24_delay = ui.add(
                     egui::Slider::new(
-                        &mut self.relative_center_ms,
-                        -(MAX_DELAY_MS as i32)..=MAX_DELAY_MS as i32,
+                        &mut self.s24_delay_ms,
+                        0..=MAX_DELAY_MS,
                     )
-                    .text("Relative center")
+                    .text("S24 delay")
                     .suffix(" ms"),
                 );
-                if center.changed() {
-                    self.apply_alignment();
+                if s24_delay.changed() {
+                    worker.controls.set_s24_delay_ms(self.s24_delay_ms);
                 }
 
-                let swing = ui.add(
+                let local_delay = ui.add(
                     egui::Slider::new(
-                        &mut self.swing_ms,
-                        1..=200,
+                        &mut self.local_delay_ms,
+                        0..=MAX_DELAY_MS,
                     )
-                    .text("Swing")
+                    .text("Realtek delay")
                     .suffix(" ms"),
                 );
-                if swing.changed() {
-                    self.apply_alignment();
+                if local_delay.changed() {
+                    worker.controls.set_local_delay_ms(self.local_delay_ms);
                 }
-
-                let swing_toggle =
-                    ui.checkbox(&mut self.swing_enabled, "Auto swing A/B");
-                if swing_toggle.changed() {
-                    self.swing_phase_b = false;
-                    self.last_swing_switch = Instant::now();
-                    self.apply_alignment();
-                }
-
-                let a_ms = self.phase_relative_ms(false);
-                let b_ms = self.phase_relative_ms(true);
-                let active = self.active_relative_ms();
-
-                ui.horizontal(|ui| {
-                    ui.monospace(format!(
-                        "A {:+} ms   B {:+} ms   now {} {:+} ms",
-                        a_ms,
-                        b_ms,
-                        if self.swing_enabled {
-                            if self.swing_phase_b { "B" } else { "A" }
-                        } else {
-                            "CENTER"
-                        },
-                        active,
-                    ));
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button("A tighter").clicked() {
-                        self.choose_phase(false);
-                    }
-                    if ui.button("B tighter").clicked() {
-                        self.choose_phase(true);
-                    }
-                    if ui.button("Use center").clicked() {
-                        self.swing_enabled = false;
-                        self.relative_center_ms = active;
-                        self.apply_alignment();
-                    }
-                });
-
-                ui.small(
-                    "+ means S24 delayed; - means Realtek delayed.                      Ignore the brief transition right after each A/B switch.",
-                );
 
                 ui.add_space(8.0);
                 if ui.button("Stop").clicked() {
-                    if let Some(worker) = self.worker.as_ref() {
-                        worker.stop();
-                    }
+                    worker.stop();
                 }
             }
 
@@ -956,8 +835,8 @@ pub fn run_dual_output_gui(
 ) -> Result<(), String> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 300.0])
-            .with_min_inner_size([480.0, 260.0])
+            .with_inner_size([430.0, 210.0])
+            .with_min_inner_size([380.0, 180.0])
             .with_resizable(false),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
