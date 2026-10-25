@@ -182,7 +182,7 @@ impl ClockServo {
             }
         }
 
-        let buffer_correction_ppm = if was_tracking {
+        let buffer_correction_ppm = if self.tracking {
             (self.config.buffer_kp_ppm_per_frame * error).clamp(
                 -self.config.max_abs_buffer_ppm,
                 self.config.max_abs_buffer_ppm,
@@ -217,7 +217,7 @@ impl ClockServo {
             }
         }
 
-        let correction_ppm = if was_tracking {
+        let correction_ppm = if self.tracking {
             (self.drift_estimate_ppm + buffer_correction_ppm).clamp(
                 -self.config.max_abs_total_ppm,
                 self.config.max_abs_total_ppm,
