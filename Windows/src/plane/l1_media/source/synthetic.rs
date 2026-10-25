@@ -23,6 +23,7 @@ const BLOCK_FRAMES: usize = 240;
 pub struct SyntheticProducer {
     stop: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU64>,
+    max_lateness_us: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -35,8 +36,10 @@ impl SyntheticProducer {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let dropped_frames = Arc::new(AtomicU64::new(0));
+        let max_lateness_us = Arc::new(AtomicU64::new(0));
         let stop_thread = Arc::clone(&stop);
         let dropped_thread = Arc::clone(&dropped_frames);
+        let lateness_thread = Arc::clone(&max_lateness_us);
 
         let thread = thread::spawn(move || {
             let effective_rate =
@@ -71,8 +74,18 @@ impl SyntheticProducer {
                 let now = Instant::now();
                 if deadline > now {
                     thread::sleep(deadline - now);
-                } else if now.duration_since(deadline) > block_period * 4 {
-                    deadline = now;
+                } else {
+                    // Never rebase the source clock after a scheduler stall.
+                    // A real source oscillator keeps advancing while our worker
+                    // is descheduled, so emit missed 240-frame blocks back-to-
+                    // back until the monotonic deadline catches up. Re-basing
+                    // here would silently delete source time and masquerade as
+                    // negative clock drift.
+                    let lateness_us = now
+                        .duration_since(deadline)
+                        .as_micros()
+                        .min(u64::MAX as u128) as u64;
+                    lateness_thread.fetch_max(lateness_us, Ordering::Relaxed);
                 }
             }
         });
@@ -80,12 +93,17 @@ impl SyntheticProducer {
         Self {
             stop,
             dropped_frames,
+            max_lateness_us,
             thread: Some(thread),
         }
     }
 
     pub fn dropped_frames(&self) -> u64 {
         self.dropped_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn max_lateness_us(&self) -> u64 {
+        self.max_lateness_us.load(Ordering::Relaxed)
     }
 
     pub fn stop(mut self) -> u64 {
