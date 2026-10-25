@@ -30,6 +30,40 @@ pub enum PacketDecodeError {
     Length,
 }
 
+
+pub fn encode_pcm16(
+    session_id: u64,
+    sequence: u64,
+    first_frame_id: u64,
+    frames: &[[i16; 2]],
+) -> Result<Vec<u8>, PacketDecodeError> {
+    if frames.is_empty() || frames.len() > MAX_PACKET_FRAMES {
+        return Err(PacketDecodeError::FrameCount);
+    }
+
+    let mut bytes = vec![0u8; HEADER_BYTES + frames.len() * CHANNELS as usize * 2];
+    bytes[0..4].copy_from_slice(&MAGIC);
+    bytes[4] = VERSION;
+    bytes[5] = 0;
+    bytes[6..8].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
+    bytes[8..16].copy_from_slice(&session_id.to_le_bytes());
+    bytes[16..24].copy_from_slice(&sequence.to_le_bytes());
+    bytes[24..32].copy_from_slice(&first_frame_id.to_le_bytes());
+    bytes[32..34].copy_from_slice(&(frames.len() as u16).to_le_bytes());
+    bytes[34] = CHANNELS;
+    bytes[35] = FORMAT_PCM16_LE;
+    bytes[36..40].copy_from_slice(&SAMPLE_RATE_HZ.to_le_bytes());
+
+    let mut offset = HEADER_BYTES;
+    for frame in frames {
+        bytes[offset..offset + 2].copy_from_slice(&frame[0].to_le_bytes());
+        bytes[offset + 2..offset + 4].copy_from_slice(&frame[1].to_le_bytes());
+        offset += 4;
+    }
+
+    Ok(bytes)
+}
+
 pub fn decode(datagram: &[u8]) -> Result<AudioPacket, PacketDecodeError> {
     if datagram.len() < HEADER_BYTES {
         return Err(PacketDecodeError::TooShort);
@@ -103,6 +137,21 @@ pub fn decode(datagram: &[u8]) -> Result<AudioPacket, PacketDecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn encode_round_trips_pcm16_v1() {
+        let source = [[16_384i16, -16_384i16], [0i16, 32_767i16]];
+        let bytes = encode_pcm16(7, 9, 240, &source).unwrap();
+        let packet = decode(&bytes).unwrap();
+
+        assert_eq!(packet.session_id, 7);
+        assert_eq!(packet.sequence, 9);
+        assert_eq!(packet.first_frame_id, 240);
+        assert_eq!(packet.frames.len(), 2);
+        assert!((packet.frames[0][0] - 0.5).abs() < 1.0e-6);
+        assert!((packet.frames[0][1] + 0.5).abs() < 1.0e-6);
+    }
 
     #[test]
     fn decodes_known_v1_packet() {
