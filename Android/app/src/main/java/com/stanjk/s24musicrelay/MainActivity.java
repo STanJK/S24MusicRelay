@@ -15,7 +15,7 @@ import android.widget.TextView;
 
 import rikka.shizuku.Shizuku;
 
-public final class MainActivity extends Activity implements CaptureService.MeterListener {
+public final class MainActivity extends Activity implements CaptureService.MeterListener, NetworkSpeakerService.Listener {
     private static final int REQ_AUDIO = 100;
     private static final int REQ_PROJECTION = 101;
     private static final int REQ_SHIZUKU = 102;
@@ -91,6 +91,23 @@ public final class MainActivity extends Activity implements CaptureService.Meter
             }
         });
 
+        networkMeter = new TextView(this);
+        networkMeter.setText("Network speaker: --");
+        networkMeter.setTextSize(16);
+        networkMeter.setPadding(0, 24, 0, 24);
+        networkMeter.setTextIsSelectable(true);
+
+        Button startNetworkSpeaker = new Button(this);
+        startNetworkSpeaker.setText("Start network speaker");
+        startNetworkSpeaker.setOnClickListener(v -> startNetworkSpeaker());
+
+        Button stopNetworkSpeaker = new Button(this);
+        stopNetworkSpeaker.setText("Stop network speaker");
+        stopNetworkSpeaker.setOnClickListener(v -> {
+            stopService(new Intent(this, NetworkSpeakerService.class));
+            status.setText("Network speaker stopped");
+        });
+
         meter = new TextView(this);
         meter.setText("PCM: --");
         meter.setTextSize(16);
@@ -114,6 +131,9 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         root.addView(setHundred);
         root.addView(delayLabel);
         root.addView(delay);
+        root.addView(networkMeter);
+        root.addView(startNetworkSpeaker);
+        root.addView(stopNetworkSpeaker);
         root.addView(meter);
         root.addView(start);
         root.addView(stop);
@@ -204,6 +224,13 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         delayLabel.setText("Local presentation delay: " + delayMs + " ms");
     }
 
+    private void startNetworkSpeaker() {
+        Intent svc = new Intent(this, NetworkSpeakerService.class);
+        svc.setAction(NetworkSpeakerService.ACTION_START);
+        startForegroundService(svc);
+        status.setText("Network speaker listening on UDP 32124...");
+    }
+
     private void beginCapture() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
@@ -245,12 +272,14 @@ public final class MainActivity extends Activity implements CaptureService.Meter
     protected void onStart() {
         super.onStart();
         CaptureService.setMeterListener(this);
+        NetworkSpeakerService.setListener(this);
         refreshShizukuStatus();
     }
 
     @Override
     protected void onStop() {
         CaptureService.setMeterListener(null);
+        NetworkSpeakerService.setListener(null);
         super.onStop();
     }
 
@@ -296,5 +325,37 @@ public final class MainActivity extends Activity implements CaptureService.Meter
     @Override
     public void onCaptureError(String message) {
         runOnUiThread(() -> status.setText("Capture error: " + message));
+    }
+
+    @Override
+    public void onNetworkSpeakerMeter(NetworkSpeakerService.Snapshot snapshot) {
+        runOnUiThread(() -> networkMeter.setText(String.format(
+                "Network speaker\n"
+                        + "  packets: %,d  seq/frame: %d / %d\n"
+                        + "  lost/reorder/decode: %,d / %,d / %,d\n"
+                        + "  conceal/skip: %,d / %,d frames\n"
+                        + "  ring: %d frames / %.2f ms  high-water: %,d\n"
+                        + "  rendered: %,d  underflow: %,d  ring-drop: %,d\n"
+                        + "  route: %s",
+                snapshot.packets,
+                snapshot.lastSequence,
+                snapshot.lastFirstFrameId,
+                snapshot.lost,
+                snapshot.reordered,
+                snapshot.decodeErrors,
+                snapshot.concealedFrames,
+                snapshot.skippedFrames,
+                snapshot.ringFrames,
+                snapshot.ringMs,
+                snapshot.ringHighWaterFrames,
+                snapshot.renderedFrames,
+                snapshot.underflowFrames,
+                snapshot.ringDroppedFrames,
+                snapshot.actualRoute)));
+    }
+
+    @Override
+    public void onNetworkSpeakerError(String message) {
+        runOnUiThread(() -> status.setText("Network speaker error: " + message));
     }
 }
