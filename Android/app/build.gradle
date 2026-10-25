@@ -21,6 +21,11 @@ android {
 }
 
 dependencies {
+    // Native Google liblc3 packaged as an Android AAR. We call its exported
+    // 48 kHz C API directly; its Java convenience wrapper is not used.
+    implementation "com.mentraglass:lc3Lib:3.4.0-dev.1103"
+    implementation "net.java.dev.jna:jna:5.19.1@aar"
+
     implementation "dev.rikka.shizuku:api:13.1.5"
     implementation "dev.rikka.shizuku:provider:13.1.5"
 }
