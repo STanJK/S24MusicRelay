@@ -125,7 +125,7 @@ public final class NetworkSpeakerService extends Service {
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setContentTitle("S24 Music Relay")
-                .setContentText("Network speaker listening on UDP 32124")
+                .setContentText("LC3 network speaker on UDP 32124")
                 .setOngoing(true)
                 .build();
 
@@ -221,7 +221,7 @@ public final class NetworkSpeakerService extends Service {
         renderThread.start();
 
         Log.i(TAG,
-                "[net-speaker] listening udp=0.0.0.0:" + UdpPcmReceiver.PORT
+                "[net-speaker] codec=LC3 48k/10ms/100Bch udp=0.0.0.0:" + UdpPcmReceiver.PORT
                         + " rcvbuf=" + receiveBufferBytes
                         + " prime=" + STARTUP_PRIME_FRAMES);
     }
