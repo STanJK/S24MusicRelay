@@ -32,6 +32,7 @@ use crate::{
 };
 
 const BLOCK_FRAMES: usize = 480;
+const SESSION_PREROLL_MS: usize = 2_000; // 200 packet-aligned silent LC3 blocks
 const RUNS: usize = 10;
 const WARMUP_MS: usize = 3_000;
 const INTERVAL_MS: usize = 3_000;
@@ -122,11 +123,14 @@ fn fill_test_block(
     let mut s24 = [[0.0f32; 2]; BLOCK_FRAMES];
 
     let block_end = source_start_frame + BLOCK_FRAMES;
+    let session_preroll_frames =
+        SAMPLE_RATE_HZ as usize * SESSION_PREROLL_MS / 1_000;
     let warmup_frames = SAMPLE_RATE_HZ as usize * WARMUP_MS / 1_000;
     let interval_frames = SAMPLE_RATE_HZ as usize * INTERVAL_MS / 1_000;
 
     for run in 0..RUNS {
-        let chirp_start = warmup_frames + run * interval_frames;
+        let chirp_start =
+            session_preroll_frames + warmup_frames + run * interval_frames;
         let chirp_end = chirp_start + chirp.len();
 
         let overlap_start = source_start_frame.max(chirp_start);
@@ -399,7 +403,11 @@ pub fn measure_chirp_alignment(
     thread::sleep(Duration::from_millis(MIC_PREROLL_MS as u64));
 
     let total_ms =
-        WARMUP_MS + (RUNS - 1) * INTERVAL_MS + CHIRP_MS + TAIL_MS;
+        SESSION_PREROLL_MS
+            + WARMUP_MS
+            + (RUNS - 1) * INTERVAL_MS
+            + CHIRP_MS
+            + TAIL_MS;
     let total_frames = SAMPLE_RATE_HZ as usize * total_ms / 1_000;
     let total_blocks = total_frames.div_ceil(BLOCK_FRAMES);
 
@@ -410,11 +418,12 @@ pub fn measure_chirp_alignment(
         config.target,
     );
     println!(
-        "[chirp] signal={}ms {:.0}->{:.0}Hz amp={:.2} warmup={}ms interval={}ms",
+        "[chirp] signal={}ms {:.0}->{:.0}Hz amp={:.2} session_preroll={}ms warmup={}ms interval={}ms",
         CHIRP_MS,
         CHIRP_START_HZ,
         CHIRP_END_HZ,
         CHIRP_AMPLITUDE,
+        SESSION_PREROLL_MS,
         WARMUP_MS,
         INTERVAL_MS,
     );
@@ -483,6 +492,8 @@ pub fn measure_chirp_alignment(
         max_late_us,
     );
 
+    let session_preroll_frames =
+        SAMPLE_RATE_HZ as usize * SESSION_PREROLL_MS / 1_000;
     let warmup_frames = SAMPLE_RATE_HZ as usize * WARMUP_MS / 1_000;
     let interval_frames = SAMPLE_RATE_HZ as usize * INTERVAL_MS / 1_000;
     let preroll_frames = SAMPLE_RATE_HZ as usize * MIC_PREROLL_MS / 1_000;
@@ -502,7 +513,8 @@ pub fn measure_chirp_alignment(
             Branch::S24
         };
 
-        let source_frame = warmup_frames + run * interval_frames;
+        let source_frame =
+            session_preroll_frames + warmup_frames + run * interval_frames;
         let expected_capture_frame = preroll_frames + source_frame;
         let search_start =
             expected_capture_frame.saturating_sub(search_early);
