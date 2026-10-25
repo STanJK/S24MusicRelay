@@ -513,7 +513,7 @@ pub fn run_chirp_align(
                 / SAMPLE_RATE_HZ as f64;
 
         println!(
-            "#{:02} {:7} hit={:7} approx={:8.2} ms corr={:.3}{}",
+            "#{:02} {:7} hit={:7} offset={:8.2} ms corr={:.3}{}",
             run + 1,
             branch.label(),
             hit_frame,
@@ -566,8 +566,8 @@ pub fn run_chirp_align(
 
     println!();
     println!("Relative acoustic latency:");
-    println!("  Realtek median : {:8.2} ms", realtek_median_ms);
-    println!("  S24 median     : {:8.2} ms", s24_median_ms);
+    println!("  Realtek common-offset median : {:8.2} ms", realtek_median_ms);
+    println!("  S24 common-offset median     : {:8.2} ms", s24_median_ms);
     println!("  S24 - Realtek  : {:+8.2} ms", delta_ms);
 
     if delta_ms >= 0.0 {
