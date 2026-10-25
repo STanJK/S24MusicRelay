@@ -37,6 +37,23 @@ pub enum PacketDecodeError {
     Length,
 }
 
+impl std::fmt::Display for PacketDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TooShort => "UDP audio packet is too short",
+            Self::Magic => "UDP audio packet magic mismatch",
+            Self::Version => "UDP audio packet version mismatch",
+            Self::HeaderSize => "UDP audio packet header-size mismatch",
+            Self::Format => "UDP audio packet format mismatch",
+            Self::FrameCount => "UDP audio packet frame count is invalid",
+            Self::Length => "UDP audio packet length mismatch",
+        })
+    }
+}
+
+impl std::error::Error for PacketDecodeError {}
+
+
 
 pub fn encode_pcm16(
     session_id: u64,
