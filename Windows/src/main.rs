@@ -4,6 +4,10 @@ mod platform;
 mod runtime;
 
 #[cfg(windows)]
+use runtime::chirp_align::{
+    run_chirp_align, ChirpAlignConfig,
+};
+#[cfg(windows)]
 use runtime::dual_output_gui::{
     run_dual_output_gui, DualOutputGuiConfig,
 };
@@ -43,6 +47,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
+
+
+        #[cfg(windows)]
+        Some("chirp-align") => {
+            let target = parse_arg(&args, "--target")
+                .ok_or("chirp-align requires --target <phone-ip>:32124")?;
+            let local_device_substring = parse_arg(&args, "--device")
+                .unwrap_or_else(|| "Realtek".to_string());
+            let mic_device_substring = parse_arg(&args, "--mic")
+                .unwrap_or_else(|| "USB_MIC".to_string());
+
+            run_chirp_align(ChirpAlignConfig {
+                target,
+                local_device_substring,
+                mic_device_substring,
+            })
+        }
 
         #[cfg(windows)]
         Some("dual-output-gui") => {
@@ -118,7 +139,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  s24relay udp-render [--bind 0.0.0.0:32124] [--device Realtek] [--seconds 30]\n  \
                  s24relay udp-send-test --target <phone-ip>:32124 [--seconds 30] [--tone-hz 440] [--gain 0.15]\n  \
                  s24relay udp-send-live --target <phone-ip>:32124 --sacrificial <substring> [--seconds 30] [--gain 1.0]\n  \
-                 s24relay dual-output-gui --target <phone-ip>:32124 --sacrificial <substring> [--device Realtek]"
+                 s24relay dual-output-gui --target <phone-ip>:32124 --sacrificial <substring> [--device Realtek]\n  \
+                 s24relay chirp-align --target <phone-ip>:32124 [--device Realtek] [--mic USB_MIC]"
             );
             Ok(())
         }
