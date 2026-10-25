@@ -5,11 +5,18 @@
 
 pub const MAGIC: [u8; 4] = *b"S24R";
 pub const VERSION: u8 = 1;
+pub const LC3_VERSION: u8 = 2;
 pub const HEADER_BYTES: usize = 40;
 pub const FORMAT_PCM16_LE: u8 = 1;
+pub const FORMAT_LC3: u8 = 2;
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
 pub const CHANNELS: u8 = 2;
 pub const MAX_PACKET_FRAMES: usize = 240;
+
+pub const LC3_FRAME_SAMPLES: usize = 480;
+pub const LC3_OCTETS_PER_CHANNEL: usize = 100;
+pub const LC3_PACKET_BYTES: usize =
+    HEADER_BYTES + LC3_OCTETS_PER_CHANNEL * CHANNELS as usize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioPacket {
@@ -60,6 +67,40 @@ pub fn encode_pcm16(
         bytes[offset + 2..offset + 4].copy_from_slice(&frame[1].to_le_bytes());
         offset += 4;
     }
+
+    Ok(bytes)
+}
+
+
+pub fn encode_lc3_stereo(
+    session_id: u64,
+    sequence: u64,
+    first_frame_id: u64,
+    left: &[u8],
+    right: &[u8],
+) -> Result<Vec<u8>, PacketDecodeError> {
+    if left.len() != LC3_OCTETS_PER_CHANNEL
+        || right.len() != LC3_OCTETS_PER_CHANNEL
+    {
+        return Err(PacketDecodeError::Length);
+    }
+
+    let mut bytes = vec![0u8; LC3_PACKET_BYTES];
+    bytes[0..4].copy_from_slice(&MAGIC);
+    bytes[4] = LC3_VERSION;
+    bytes[5] = 0;
+    bytes[6..8].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
+    bytes[8..16].copy_from_slice(&session_id.to_le_bytes());
+    bytes[16..24].copy_from_slice(&sequence.to_le_bytes());
+    bytes[24..32].copy_from_slice(&first_frame_id.to_le_bytes());
+    bytes[32..34].copy_from_slice(&(LC3_FRAME_SAMPLES as u16).to_le_bytes());
+    bytes[34] = CHANNELS;
+    bytes[35] = FORMAT_LC3;
+    bytes[36..40].copy_from_slice(&SAMPLE_RATE_HZ.to_le_bytes());
+
+    let left_end = HEADER_BYTES + LC3_OCTETS_PER_CHANNEL;
+    bytes[HEADER_BYTES..left_end].copy_from_slice(left);
+    bytes[left_end..].copy_from_slice(right);
 
     Ok(bytes)
 }
@@ -138,6 +179,28 @@ pub fn decode(datagram: &[u8]) -> Result<AudioPacket, PacketDecodeError> {
 mod tests {
     use super::*;
 
+
+
+    #[test]
+    fn encodes_lc3_v2_wire_contract() {
+        let left = vec![0x11u8; LC3_OCTETS_PER_CHANNEL];
+        let right = vec![0x22u8; LC3_OCTETS_PER_CHANNEL];
+
+        let bytes =
+            encode_lc3_stereo(7, 9, 480, &left, &right).unwrap();
+
+        assert_eq!(bytes.len(), LC3_PACKET_BYTES);
+        assert_eq!(&bytes[0..4], &MAGIC);
+        assert_eq!(bytes[4], LC3_VERSION);
+        assert_eq!(
+            u16::from_le_bytes(bytes[32..34].try_into().unwrap()) as usize,
+            LC3_FRAME_SAMPLES
+        );
+        assert_eq!(bytes[34], CHANNELS);
+        assert_eq!(bytes[35], FORMAT_LC3);
+        assert_eq!(&bytes[40..140], left.as_slice());
+        assert_eq!(&bytes[140..240], right.as_slice());
+    }
 
     #[test]
     fn encode_round_trips_pcm16_v1() {
