@@ -13,6 +13,7 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
+import android.media.AudioTrack;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
@@ -20,7 +21,10 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Process;
+import android.os.SystemClock;
 import android.util.Log;
+
+import java.util.Arrays;
 
 public final class CaptureService extends Service {
     private static final String TAG = "S24MusicRelay";
@@ -35,16 +39,13 @@ public final class CaptureService extends Service {
     private static final String CHANNEL_ID = "capture";
     private static final int NOTIFICATION_ID = 24;
 
-    private static final int SOURCE_UID = 10341;
-
     private static final int SAMPLE_RATE = 48_000;
     private static final int CHANNELS = 2;
     private static final int RENDER_BLOCK_FRAMES = 480;      // 10 ms
-    private static final int TRANSPORT_RING_FRAMES = 4096;   // ~85 ms per sink
+    private static final int TRANSPORT_RING_FRAMES = 4096;   // ~85 ms capacity, not presentation delay
     private static final int MAX_DELAY_MS = 500;
 
-    private static volatile int configuredSpeakerDelayMs;
-    private static volatile int configuredUsbDelayMs;
+    private static volatile int configuredDelayMs;
 
     public interface MeterListener {
         void onMeter(MeterSnapshot snapshot);
@@ -53,27 +54,16 @@ public final class CaptureService extends Service {
 
     public static final class MeterSnapshot {
         public final long capturedFrames;
+        public final long renderedFrames;
         public final double peak;
         public final double rms;
         public final String samples;
-
-        public final long speakerRenderedFrames;
-        public final int speakerRingFrames;
-        public final double speakerRingMs;
-        public final long speakerRingHighWaterFrames;
-        public final long speakerUnderflowFrames;
-        public final long speakerDroppedFrames;
-        public final int speakerDelayMs;
-
-        public final boolean usbActive;
-        public final long usbRenderedFrames;
-        public final int usbRingFrames;
-        public final double usbRingMs;
-        public final long usbRingHighWaterFrames;
-        public final long usbUnderflowFrames;
-        public final long usbDroppedFrames;
-        public final int usbDelayMs;
-
+        public final int ringFrames;
+        public final double ringMs;
+        public final long ringHighWaterFrames;
+        public final long underflowFrames;
+        public final long droppedFrames;
+        public final int configuredDelayMs;
         public final long udpPacketsSent;
         public final long udpLastSequence;
         public final long udpLastFirstFrame;
@@ -81,50 +71,31 @@ public final class CaptureService extends Service {
 
         MeterSnapshot(
                 long capturedFrames,
+                long renderedFrames,
                 double peak,
                 double rms,
                 String samples,
-                long speakerRenderedFrames,
-                int speakerRingFrames,
-                double speakerRingMs,
-                long speakerRingHighWaterFrames,
-                long speakerUnderflowFrames,
-                long speakerDroppedFrames,
-                int speakerDelayMs,
-                boolean usbActive,
-                long usbRenderedFrames,
-                int usbRingFrames,
-                double usbRingMs,
-                long usbRingHighWaterFrames,
-                long usbUnderflowFrames,
-                long usbDroppedFrames,
-                int usbDelayMs,
+                int ringFrames,
+                double ringMs,
+                long ringHighWaterFrames,
+                long underflowFrames,
+                long droppedFrames,
+                int configuredDelayMs,
                 long udpPacketsSent,
                 long udpLastSequence,
                 long udpLastFirstFrame,
                 long udpQueueDroppedFrames) {
             this.capturedFrames = capturedFrames;
+            this.renderedFrames = renderedFrames;
             this.peak = peak;
             this.rms = rms;
             this.samples = samples;
-
-            this.speakerRenderedFrames = speakerRenderedFrames;
-            this.speakerRingFrames = speakerRingFrames;
-            this.speakerRingMs = speakerRingMs;
-            this.speakerRingHighWaterFrames = speakerRingHighWaterFrames;
-            this.speakerUnderflowFrames = speakerUnderflowFrames;
-            this.speakerDroppedFrames = speakerDroppedFrames;
-            this.speakerDelayMs = speakerDelayMs;
-
-            this.usbActive = usbActive;
-            this.usbRenderedFrames = usbRenderedFrames;
-            this.usbRingFrames = usbRingFrames;
-            this.usbRingMs = usbRingMs;
-            this.usbRingHighWaterFrames = usbRingHighWaterFrames;
-            this.usbUnderflowFrames = usbUnderflowFrames;
-            this.usbDroppedFrames = usbDroppedFrames;
-            this.usbDelayMs = usbDelayMs;
-
+            this.ringFrames = ringFrames;
+            this.ringMs = ringMs;
+            this.ringHighWaterFrames = ringHighWaterFrames;
+            this.underflowFrames = underflowFrames;
+            this.droppedFrames = droppedFrames;
+            this.configuredDelayMs = configuredDelayMs;
             this.udpPacketsSent = udpPacketsSent;
             this.udpLastSequence = udpLastSequence;
             this.udpLastFirstFrame = udpLastFirstFrame;
@@ -138,32 +109,27 @@ public final class CaptureService extends Service {
         meterListener = listener;
     }
 
-    public static void setConfiguredSpeakerDelayMs(int delayMs) {
-        configuredSpeakerDelayMs = clampDelayMs(delayMs);
+    public static void setConfiguredDelayMs(int delayMs) {
+        configuredDelayMs = Math.max(0, Math.min(MAX_DELAY_MS, delayMs));
     }
 
-    public static int getConfiguredSpeakerDelayMs() {
-        return configuredSpeakerDelayMs;
-    }
-
-    public static void setConfiguredUsbDelayMs(int delayMs) {
-        configuredUsbDelayMs = clampDelayMs(delayMs);
-    }
-
-    public static int getConfiguredUsbDelayMs() {
-        return configuredUsbDelayMs;
+    public static int getConfiguredDelayMs() {
+        return configuredDelayMs;
     }
 
     private volatile boolean running;
+    private volatile long renderedFrames;
+    private volatile long renderUnderflowFrames;
+    private volatile long captureDroppedFrames;
 
     private Thread captureThread;
+    private Thread renderThread;
     private AudioRecord audioRecord;
+    private AudioTrack audioTrack;
     private MediaProjection mediaProjection;
+    private PcmSpscRing transportRing;
+    private FixedDelayLine delayLine;
     private UdpPcmSender udpSender;
-
-    private volatile AudioRenderSink speakerSink;
-    private volatile AudioRenderSink usbSink;
-
     private AudioManager audioManager;
     private Handler mainHandler;
     private AudioDeviceCallback audioDeviceCallback;
@@ -177,20 +143,14 @@ public final class CaptureService extends Service {
         audioDeviceCallback = new AudioDeviceCallback() {
             @Override
             public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
-                if (pinSourceAppToSpeaker("device-added")) {
-                    refreshRenderDevices("device-added");
-                } else {
-                    Log.e(TAG, "[route/usb] device-added blocked: source UID is not pinned to speaker");
-                }
+                routeLocalTrackToBuiltinSpeaker("device-added");
             }
 
             @Override
             public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
-                pinSourceAppToSpeaker("device-removed");
-                refreshRenderDevices("device-removed");
+                routeLocalTrackToBuiltinSpeaker("device-removed");
             }
         };
-
         if (audioManager != null) {
             audioManager.registerAudioDeviceCallback(audioDeviceCallback, mainHandler);
         }
@@ -209,7 +169,7 @@ public final class CaptureService extends Service {
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setContentTitle("S24 Music Relay")
-                .setContentText("Capturing PCM to speaker + USB DAC")
+                .setContentText("Capturing and locally re-rendering PCM")
                 .setOngoing(true)
                 .build();
 
@@ -260,7 +220,7 @@ public final class CaptureService extends Service {
                 stopCapture();
                 stopSelf();
             }
-        }, mainHandler);
+        }, new Handler(Looper.getMainLooper()));
 
         AudioPlaybackCaptureConfiguration config =
                 new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
@@ -294,27 +254,41 @@ public final class CaptureService extends Service {
             throw new IllegalStateException("AudioRecord not initialized");
         }
 
-        // Own the source-app route before any USB sink is created. On Samsung,
-        // allowing the source UID to migrate to USB makes setAppVolume(0)
-        // silence the playback-capture tap as well.
-        if (!pinSourceAppToSpeaker("capture-start")) {
-            throw new IllegalStateException("source app could not be pinned to built-in speaker");
+        AudioAttributes playbackAttributes = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build();
+
+        AudioFormat playbackFormat = new AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                .build();
+
+        int minPlaybackBytes = AudioTrack.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_OUT_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT);
+        int playbackBufferBytes = Math.max(
+                minPlaybackBytes,
+                RENDER_BLOCK_FRAMES * CHANNELS * 2 * 2);
+
+        audioTrack = new AudioTrack.Builder()
+                .setAudioAttributes(playbackAttributes)
+                .setAudioFormat(playbackFormat)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(playbackBufferBytes)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                .build();
+
+        if (audioTrack.getState() != AudioTrack.STATE_INITIALIZED) {
+            throw new IllegalStateException("AudioTrack not initialized");
         }
 
-        AudioDeviceInfo speaker = findBuiltinSpeaker();
-        if (speaker == null) {
-            throw new IllegalStateException("Built-in speaker output not found");
-        }
+        routeLocalTrackToBuiltinSpeaker("track-created");
 
-        speakerSink = createSink("speaker", speaker, configuredSpeakerDelayMs);
-
-        AudioDeviceInfo usb = findUsbOutput();
-        if (usb != null) {
-            usbSink = createSink("usb", usb, configuredUsbDelayMs);
-        } else {
-            usbSink = null;
-            Log.i(TAG, "[route/usb] no USB output at capture start");
-        }
+        transportRing = new PcmSpscRing(TRANSPORT_RING_FRAMES, CHANNELS);
+        delayLine = new FixedDelayLine(msToFrames(MAX_DELAY_MS), CHANNELS);
 
         try {
             udpSender = new UdpPcmSender(
@@ -331,48 +305,23 @@ public final class CaptureService extends Service {
             udpSender = null;
         }
 
+        renderedFrames = 0;
+        renderUnderflowFrames = 0;
+        captureDroppedFrames = 0;
         running = true;
+
         audioRecord.startRecording();
 
-        speakerSink.start();
-        AudioRenderSink currentUsb = usbSink;
-        if (currentUsb != null) {
-            currentUsb.start();
-        }
-
         captureThread = new Thread(this::captureLoop, "PCM-Capture");
+        renderThread = new Thread(this::renderLoop, "PCM-Render");
         captureThread.start();
-
-        Handler handler = mainHandler;
-        if (handler != null) {
-            handler.postDelayed(() -> {
-                AudioRenderSink currentSpeaker = speakerSink;
-                if (currentSpeaker != null) currentSpeaker.logRoute("settled");
-                AudioRenderSink settledUsb = usbSink;
-                if (settledUsb != null) settledUsb.logRoute("settled");
-            }, 250);
-        }
-    }
-
-    private AudioRenderSink createSink(
-            String label,
-            AudioDeviceInfo preferredDevice,
-            int delayMs) {
-        AudioRenderSink sink = new AudioRenderSink(
-                label,
-                SAMPLE_RATE,
-                CHANNELS,
-                RENDER_BLOCK_FRAMES,
-                TRANSPORT_RING_FRAMES,
-                msToFrames(MAX_DELAY_MS),
-                preferredDevice);
-        sink.setDelayFrames(msToFrames(delayMs));
-        return sink;
+        renderThread.start();
     }
 
     private void captureLoop() {
         final AudioRecord record = audioRecord;
-        if (record == null) return;
+        final PcmSpscRing ring = transportRing;
+        if (record == null || ring == null) return;
 
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
@@ -403,16 +352,9 @@ public final class CaptureService extends Service {
                 sender.offer(pcm, samplesRead, firstFrameId);
             }
 
-            AudioRenderSink currentSpeaker = speakerSink;
-            if (currentSpeaker != null) {
-                currentSpeaker.setDelayFrames(msToFrames(configuredSpeakerDelayMs));
-                currentSpeaker.offer(pcm, samplesRead);
-            }
-
-            AudioRenderSink currentUsb = usbSink;
-            if (currentUsb != null) {
-                currentUsb.setDelayFrames(msToFrames(configuredUsbDelayMs));
-                currentUsb.offer(pcm, samplesRead);
+            int framesWritten = ring.write(pcm, 0, framesRead);
+            if (framesWritten < framesRead) {
+                captureDroppedFrames += framesRead - framesWritten;
             }
 
             long now = System.nanoTime();
@@ -436,156 +378,152 @@ public final class CaptureService extends Service {
                 sb.append(pcm[i]);
             }
 
-            currentSpeaker = speakerSink;
-            currentUsb = usbSink;
-
+            int ringFrames = ring.availableFrames();
             MeterSnapshot snapshot = new MeterSnapshot(
                     capturedFrames,
+                    renderedFrames,
                     peakAbs / 32768.0,
                     Math.sqrt(sumSq / samplesRead),
                     sb.toString(),
-
-                    currentSpeaker == null ? 0 : currentSpeaker.renderedFrames(),
-                    currentSpeaker == null ? 0 : currentSpeaker.ringFrames(),
-                    currentSpeaker == null ? 0.0 : framesToMs(currentSpeaker.ringFrames()),
-                    currentSpeaker == null ? 0 : currentSpeaker.ringHighWaterFrames(),
-                    currentSpeaker == null ? 0 : currentSpeaker.underflowFrames(),
-                    currentSpeaker == null ? 0 : currentSpeaker.droppedFrames(),
-                    configuredSpeakerDelayMs,
-
-                    currentUsb != null,
-                    currentUsb == null ? 0 : currentUsb.renderedFrames(),
-                    currentUsb == null ? 0 : currentUsb.ringFrames(),
-                    currentUsb == null ? 0.0 : framesToMs(currentUsb.ringFrames()),
-                    currentUsb == null ? 0 : currentUsb.ringHighWaterFrames(),
-                    currentUsb == null ? 0 : currentUsb.underflowFrames(),
-                    currentUsb == null ? 0 : currentUsb.droppedFrames(),
-                    configuredUsbDelayMs,
-
-                    sender == null ? 0 : sender.packetsSent(),
-                    sender == null ? -1 : sender.lastSequence(),
-                    sender == null ? -1 : sender.lastFirstFrameId(),
-                    sender == null ? 0 : sender.queueDroppedFrames());
+                    ringFrames,
+                    framesToMs(ringFrames),
+                    ring.highWaterFrames(),
+                    renderUnderflowFrames,
+                    captureDroppedFrames,
+                    configuredDelayMs,
+                    udpSender == null ? 0 : udpSender.packetsSent(),
+                    udpSender == null ? -1 : udpSender.lastSequence(),
+                    udpSender == null ? -1 : udpSender.lastFirstFrameId(),
+                    udpSender == null ? 0 : udpSender.queueDroppedFrames());
 
             MeterListener listener = meterListener;
             if (listener != null) listener.onMeter(snapshot);
         }
     }
 
-    private boolean pinSourceAppToSpeaker(String reason) {
-        try {
-            ShizukuAudioBridge.setAppDevice(
-                    SOURCE_UID,
-                    ShizukuAudioBridge.DEVICE_OUT_SPEAKER,
-                    false);
-            int actual = ShizukuAudioBridge.getAppDevice(SOURCE_UID);
-            boolean pinned =
-                    (actual & ShizukuAudioBridge.DEVICE_OUT_SPEAKER) != 0;
-            Log.i(TAG,
-                    "[source-route] " + reason
-                            + " uid=" + SOURCE_UID
-                            + " requested=0x"
-                            + Integer.toHexString(ShizukuAudioBridge.DEVICE_OUT_SPEAKER)
-                            + " actual=0x"
-                            + Integer.toHexString(actual)
-                            + " pinned=" + pinned);
-            return pinned;
-        } catch (Throwable t) {
-            Log.e(TAG,
-                    "[source-route] " + reason
-                            + " failed: "
-                            + t.getClass().getSimpleName()
-                            + ": "
-                            + t.getMessage());
-            return false;
-        }
-    }
+    private void renderLoop() {
+        final AudioTrack track = audioTrack;
+        final PcmSpscRing ring = transportRing;
+        final FixedDelayLine delay = delayLine;
+        if (track == null || ring == null || delay == null) return;
 
-    private synchronized void refreshRenderDevices(String reason) {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+        } catch (Throwable ignored) {
+        }
+
+        short[] transportBlock = new short[RENDER_BLOCK_FRAMES * CHANNELS];
+        short[] delayedBlock = new short[RENDER_BLOCK_FRAMES * CHANNELS];
+
+        // Startup priming is transport elasticity only. Presentation delay is handled below.
+        while (running && ring.availableFrames() < RENDER_BLOCK_FRAMES) {
+            SystemClock.sleep(1);
+        }
         if (!running) return;
 
-        AudioDeviceInfo speaker = findBuiltinSpeaker();
-        AudioRenderSink currentSpeaker = speakerSink;
-        if (speaker != null && currentSpeaker != null) {
-            currentSpeaker.setPreferredDevice(speaker, reason);
-        }
-
-        AudioDeviceInfo usb = findUsbOutput();
-        AudioRenderSink currentUsb = usbSink;
-
-        if (usb == null) {
-            if (currentUsb != null) {
-                usbSink = null;
-                currentUsb.close();
-                Log.i(TAG, "[route/usb] " + reason + " USB output removed");
-            }
-            return;
-        }
-
-        if (currentUsb != null && currentUsb.preferredDeviceId() == usb.getId()) {
-            currentUsb.setPreferredDevice(usb, reason);
-            return;
-        }
-
-        AudioRenderSink replacement;
-        try {
-            replacement = createSink("usb", usb, configuredUsbDelayMs);
-            replacement.start();
-        } catch (Throwable t) {
-            fail("USB render init failed: "
-                    + t.getClass().getSimpleName()
-                    + ": "
-                    + t.getMessage());
-            return;
-        }
-
-        usbSink = replacement;
-        if (currentUsb != null) {
-            currentUsb.close();
-        }
-
+        track.play();
         Handler handler = mainHandler;
         if (handler != null) {
-            handler.postDelayed(() -> {
-                AudioRenderSink settledUsb = usbSink;
-                if (settledUsb == replacement) {
-                    settledUsb.logRoute(reason + "/settled");
+            handler.postDelayed(() -> logLocalTrackRoute("after-play"), 250);
+        }
+
+        while (running) {
+            int framesRead = ring.read(transportBlock, 0, RENDER_BLOCK_FRAMES);
+            if (framesRead < RENDER_BLOCK_FRAMES) {
+                int missingFrames = RENDER_BLOCK_FRAMES - framesRead;
+                Arrays.fill(
+                        transportBlock,
+                        framesRead * CHANNELS,
+                        RENDER_BLOCK_FRAMES * CHANNELS,
+                        (short) 0);
+                renderUnderflowFrames += missingFrames;
+            }
+
+            delay.setDelayFrames(msToFrames(configuredDelayMs));
+            delay.process(
+                    transportBlock,
+                    0,
+                    delayedBlock,
+                    0,
+                    RENDER_BLOCK_FRAMES);
+
+            int samplesWritten = 0;
+            final int samplesToWrite = delayedBlock.length;
+            while (running && samplesWritten < samplesToWrite) {
+                int n = track.write(
+                        delayedBlock,
+                        samplesWritten,
+                        samplesToWrite - samplesWritten,
+                        AudioTrack.WRITE_BLOCKING);
+
+                if (n < 0) {
+                    if (running) fail("AudioTrack.write = " + n);
+                    running = false;
+                    break;
                 }
-            }, 250);
+                if (n == 0) {
+                    Thread.yield();
+                    continue;
+                }
+                samplesWritten += n;
+            }
+
+            if (samplesWritten == samplesToWrite) {
+                renderedFrames += RENDER_BLOCK_FRAMES;
+            }
         }
     }
 
-    private AudioDeviceInfo findBuiltinSpeaker() {
+    private void routeLocalTrackToBuiltinSpeaker(String reason) {
+        AudioTrack track = audioTrack;
         AudioManager manager = audioManager;
-        if (manager == null) return null;
+        if (track == null || manager == null) return;
 
+        AudioDeviceInfo speaker = null;
         for (AudioDeviceInfo device :
                 manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
             if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
-                return device;
+                speaker = device;
+                break;
             }
         }
-        return null;
-    }
 
-    private AudioDeviceInfo findUsbOutput() {
-        AudioManager manager = audioManager;
-        if (manager == null) return null;
-
-        for (AudioDeviceInfo device :
-                manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
-            int type = device.getType();
-            if (type == AudioDeviceInfo.TYPE_USB_DEVICE
-                    || type == AudioDeviceInfo.TYPE_USB_HEADSET
-                    || type == AudioDeviceInfo.TYPE_USB_ACCESSORY) {
-                return device;
-            }
+        if (speaker == null) {
+            Log.w(TAG, "[route] " + reason + " builtin speaker not found");
+            return;
         }
-        return null;
+
+        boolean accepted = track.setPreferredDevice(speaker);
+        Log.i(TAG,
+                "[route] " + reason
+                        + " prefer builtin speaker accepted=" + accepted
+                        + " id=" + speaker.getId()
+                        + " product=" + speaker.getProductName());
+
+        Handler handler = mainHandler;
+        if (handler != null) {
+            handler.postDelayed(() -> logLocalTrackRoute(reason + "/settled"), 250);
+        }
     }
 
-    private static int clampDelayMs(int ms) {
-        return Math.max(0, Math.min(MAX_DELAY_MS, ms));
+    private void logLocalTrackRoute(String reason) {
+        AudioTrack track = audioTrack;
+        if (track == null) return;
+
+        AudioDeviceInfo preferred = track.getPreferredDevice();
+        AudioDeviceInfo routed = track.getRoutedDevice();
+
+        Log.i(TAG,
+                "[route] " + reason
+                        + " preferred=" + describeAudioDevice(preferred)
+                        + " actual=" + describeAudioDevice(routed));
+    }
+
+    private static String describeAudioDevice(AudioDeviceInfo device) {
+        if (device == null) return "null";
+        return "type=" + device.getType()
+                + ",id=" + device.getId()
+                + ",product=" + device.getProductName();
     }
 
     private static int msToFrames(int ms) {
@@ -599,7 +537,6 @@ public final class CaptureService extends Service {
     private void fail(String message) {
         MeterListener listener = meterListener;
         if (listener != null) listener.onCaptureError(message);
-        Log.e(TAG, message);
     }
 
     private synchronized void stopCapture() {
@@ -612,19 +549,19 @@ public final class CaptureService extends Service {
             record.release();
         }
 
+        AudioTrack track = audioTrack;
+        audioTrack = null;
+        if (track != null) {
+            try { track.pause(); } catch (Throwable ignored) {}
+            try { track.flush(); } catch (Throwable ignored) {}
+            try { track.stop(); } catch (Throwable ignored) {}
+            track.release();
+        }
+
         captureThread = null;
-
-        AudioRenderSink speaker = speakerSink;
-        speakerSink = null;
-        if (speaker != null) {
-            speaker.close();
-        }
-
-        AudioRenderSink usb = usbSink;
-        usbSink = null;
-        if (usb != null) {
-            usb.close();
-        }
+        renderThread = null;
+        transportRing = null;
+        delayLine = null;
 
         UdpPcmSender sender = udpSender;
         udpSender = null;
@@ -651,7 +588,6 @@ public final class CaptureService extends Service {
             } catch (Throwable ignored) {
             }
         }
-
         audioDeviceCallback = null;
         audioManager = null;
         mainHandler = null;
