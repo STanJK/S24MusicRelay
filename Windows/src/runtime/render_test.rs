@@ -146,13 +146,14 @@ pub fn run_render_test(
                 };
 
             println!(
-                "[asrc] raw={} filtered={:.1} err={:+.1} step={:.9} \
+                "[asrc] raw={} filtered={:.1} err={:+.1} slope={:+.1}f/s step={:.9} \
                  total={:+.2}ppm drift={:+.2}ppm buffer={:+.2}ppm observed={:+.1}ppm \
                  acquiring={} stable={:.2}s underflow={} retired={} producer_drop={} \
                  producer_max_late_us={}",
                 servo_out.raw_fill_frames,
                 servo_out.filtered_fill_frames,
                 servo_out.fill_error_frames,
+                servo_out.filtered_fill_slope_frames_per_second,
                 servo_out.step,
                 servo_out.correction_ppm,
                 servo_out.drift_estimate_ppm,
