@@ -9,6 +9,15 @@ use wasapi::{
     WaveFormat, initialize_mta,
 };
 
+
+#[cfg(target_os = "windows")]
+pub fn default_render_name() -> Result<String, Box<dyn std::error::Error>> {
+    initialize_mta().ok()?;
+    let enumerator = DeviceEnumerator::new()?;
+    let device = enumerator.get_default_device(&Direction::Render)?;
+    Ok(device.get_friendlyname()?)
+}
+
 #[cfg(target_os = "windows")]
 pub struct WasapiRenderSink {
     pub device_name: String,
