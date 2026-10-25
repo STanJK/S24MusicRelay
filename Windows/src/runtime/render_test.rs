@@ -133,7 +133,7 @@ pub fn run_render_test(
         if last_report.elapsed() >= Duration::from_secs(1) {
             println!(
                 "[asrc] residual={} err={:+.0} step={:.9} correction={:+.2}ppm \
-                 underflow={} retired={} producer_drop={}",
+                 underflow={} retired={} producer_drop={} producer_max_late_us={}",
                 ring.available_frames(),
                 servo_out.fill_error_frames,
                 servo_out.step,
@@ -141,6 +141,7 @@ pub fn run_render_test(
                 total_underflow,
                 total_retired,
                 producer.dropped_frames(),
+                producer.max_lateness_us(),
             );
             last_report = Instant::now();
         }
