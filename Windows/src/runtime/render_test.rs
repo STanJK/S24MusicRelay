@@ -83,10 +83,6 @@ pub fn run_render_test(
     let mut total_underflow = 0u64;
     let mut total_retired = 0u64;
     let mut last_report = Instant::now();
-    let started = Instant::now();
-
-    let source_baseline = producer.produced_frames();
-    let output_baseline = total_output;
 
     if initial_wasapi_frames > 0 {
         let mut frames = vec![[0.0f32; 2]; initial_wasapi_frames];
@@ -107,6 +103,14 @@ pub fn run_render_test(
     }
 
     sink.audio_client.start_stream()?;
+
+    // Start rate observation only after the initial WASAPI prefill has been
+    // committed. Otherwise the output baseline contains one buffer of audio
+    // that the source-progress baseline never saw, creating a large fake
+    // negative ppm bias that only decays slowly with runtime.
+    let source_baseline = producer.produced_frames();
+    let output_baseline = total_output;
+    let started = Instant::now();
 
     while started.elapsed() < Duration::from_secs(config.seconds) {
         sink.event.wait_for_event(1_000)?;
