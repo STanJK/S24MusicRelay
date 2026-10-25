@@ -109,6 +109,7 @@ final class UdpPcmReceiver implements AutoCloseable {
     private final AtomicLong ringDroppedFrames = new AtomicLong();
     private final AtomicLong lastSequence = new AtomicLong(-1);
     private final AtomicLong lastFirstFrameId = new AtomicLong(-1);
+    private final AtomicLong sessionGeneration = new AtomicLong();
 
     private volatile boolean running;
     private DatagramSocket socket;
@@ -137,6 +138,10 @@ final class UdpPcmReceiver implements AutoCloseable {
         thread = new Thread(this::receiveLoop, "UDP-LC3-Receiver");
         thread.start();
         return s.getReceiveBufferSize();
+    }
+
+    long sessionGeneration() {
+        return sessionGeneration.get();
     }
 
     Stats stats() {
@@ -209,6 +214,11 @@ final class UdpPcmReceiver implements AutoCloseable {
             pending.clear();
             ring.clear();
             decoder.reset();
+
+            // Publish only after the old PCM pool has been invalidated. The
+            // render owner uses this generation edge to flush AudioTrack and
+            // enforce a fresh full prime for every wire session.
+            sessionGeneration.incrementAndGet();
         }
 
         if (packet.sequence < nextSequence) {
