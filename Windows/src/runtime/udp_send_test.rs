@@ -1,4 +1,4 @@
-//! Windows -> Android first-sound HIL using a deterministic PCM tone.
+//! Windows -> Android first-sound HIL using LC3-over-UDP v2.
 
 #[derive(Clone, Debug)]
 pub struct UdpSendTestConfig {
@@ -18,10 +18,15 @@ pub fn run_udp_send_test(
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
+    use bumble_codecs::lc3::{
+        Lc3Encoder, Lc3FrameDuration, Lc3StreamConfig,
+    };
+
     use crate::plane::l2_transport::protocol::{
-        MAX_PACKET_FRAMES,
+        LC3_FRAME_SAMPLES,
+        LC3_OCTETS_PER_CHANNEL,
         SAMPLE_RATE_HZ,
-        encode_pcm16,
+        encode_lc3_stereo,
     };
 
     let socket = UdpSocket::bind("0.0.0.0:0")?;
@@ -32,9 +37,20 @@ pub fn run_udp_send_test(
         .as_nanos() as u64
         ^ ((std::process::id() as u64) << 32);
 
-    let packet_duration = Duration::from_secs_f64(
-        MAX_PACKET_FRAMES as f64 / SAMPLE_RATE_HZ as f64,
-    );
+    let codec = Lc3StreamConfig {
+        sampling_frequency: SAMPLE_RATE_HZ,
+        frame_duration: Lc3FrameDuration::TenMs,
+        channels: 1,
+        octets_per_codec_frame: LC3_OCTETS_PER_CHANNEL,
+        codec_frames_per_sdu: 1,
+    };
+
+    debug_assert_eq!(codec.frame_samples(), LC3_FRAME_SAMPLES);
+
+    let left_encoder = Lc3Encoder::new(codec)?;
+    let right_encoder = Lc3Encoder::new(codec)?;
+
+    let packet_duration = Duration::from_micros(10_000);
 
     let started = Instant::now();
     let deadline = started + Duration::from_secs(config.seconds);
@@ -52,12 +68,11 @@ pub fn run_udp_send_test(
     let mut last_report = Instant::now();
 
     println!(
-        "[udp-send-test] target={} tone={:.1}Hz gain={:.3} packet={}f/{:.1}ms session={}",
+        "[udp-send-test] target={} codec=LC3 48k/10ms/{}Bch tone={:.1}Hz gain={:.3} packet=10.0ms session={}",
         config.target,
+        LC3_OCTETS_PER_CHANNEL,
         config.tone_hz,
         gain,
-        MAX_PACKET_FRAMES,
-        packet_duration.as_secs_f64() * 1000.0,
         session_id,
     );
 
@@ -71,13 +86,16 @@ pub fn run_udp_send_test(
             );
         }
 
-        let mut frames = Vec::with_capacity(MAX_PACKET_FRAMES);
-        for _ in 0..MAX_PACKET_FRAMES {
+        let mut left_pcm = [0i16; LC3_FRAME_SAMPLES];
+        let mut right_pcm = [0i16; LC3_FRAME_SAMPLES];
+
+        for i in 0..LC3_FRAME_SAMPLES {
             let sample = (phase.sin() * gain * i16::MAX as f64)
                 .round()
                 .clamp(i16::MIN as f64, i16::MAX as f64) as i16;
 
-            frames.push([sample, sample]);
+            left_pcm[i] = sample;
+            right_pcm[i] = sample;
 
             phase += phase_step;
             if phase >= TAU {
@@ -85,11 +103,27 @@ pub fn run_udp_send_test(
             }
         }
 
-        let bytes = encode_pcm16(
+        let left = left_encoder.encode_sdu(&left_pcm)?;
+        let right = right_encoder.encode_sdu(&right_pcm)?;
+
+        if left.len() != LC3_OCTETS_PER_CHANNEL
+            || right.len() != LC3_OCTETS_PER_CHANNEL
+        {
+            return Err(format!(
+                "LC3 encoded size mismatch: left={} right={} expected={}",
+                left.len(),
+                right.len(),
+                LC3_OCTETS_PER_CHANNEL
+            )
+            .into());
+        }
+
+        let bytes = encode_lc3_stereo(
             session_id,
             sequence,
             first_frame_id,
-            &frames,
+            &left,
+            &right,
         )?;
 
         let sent = socket.send(&bytes)?;
@@ -105,7 +139,7 @@ pub fn run_udp_send_test(
         packets_sent += 1;
         bytes_sent += sent as u64;
         sequence += 1;
-        first_frame_id += MAX_PACKET_FRAMES as u64;
+        first_frame_id += LC3_FRAME_SAMPLES as u64;
 
         // Preserve the synthetic source timeline across scheduler stalls.
         next_send += packet_duration;
