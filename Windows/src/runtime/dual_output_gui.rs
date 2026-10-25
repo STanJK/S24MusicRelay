@@ -43,6 +43,8 @@ use crate::{
 };
 
 const BLOCK_FRAMES: usize = 480;
+const SESSION_PREROLL_MS: u64 = 2_000;
+const SESSION_PREROLL_PACKETS: u64 = SESSION_PREROLL_MS / 10;
 const LOCAL_QUEUE_BLOCKS: usize = 16;
 const LOCAL_STARTUP_CUSHION_FRAMES: usize = 1_920;
 const MAX_DELAY_MS: u32 = 3_000;
@@ -267,6 +269,18 @@ fn push_local_block(
             );
         }
         Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
+fn drain_source_queue(source: &ProcessLoopbackSource) -> Result<(), String> {
+    loop {
+        match source.recv_timeout(Duration::ZERO) {
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("process-loopback source queue disconnected".into())
+            }
+        }
     }
 }
 
@@ -532,11 +546,101 @@ fn run_dual_output(
     let mut assembler = FrameAssembler::default();
     let mut s24_delay = AdjustableDelay::default();
     let mut sequence = 0u64;
+    let mut session_frame_id = 0u64;
     let mut packets_sent = 0u64;
     let mut bytes_sent = 0u64;
     let mut last_report = Instant::now();
 
     let stream_result: Result<(), String> = (|| {
+        // Session-level warmup is part of the wire timeline. Both branches
+        // receive the same integer number of 10 ms silent blocks so Android
+        // AudioTrack, Samsung DSP, local WASAPI and both delay lines are hot
+        // before any programme PCM is admitted.
+        let silence = [[0.0f32; 2]; BLOCK_FRAMES];
+        let block_period = Duration::from_millis(10);
+        let mut next_deadline = Instant::now();
+
+        for _ in 0..SESSION_PREROLL_PACKETS {
+            if controls.stop_requested() {
+                return Ok(());
+            }
+
+            // Process Loopback is already running so activation cost cannot
+            // create a network hole. Discard all capture produced during
+            // warmup; media epoch begins only after the final silent packet.
+            drain_source_queue(&source)?;
+
+            push_local_block(
+                &local_tx,
+                LocalBlock {
+                    first_frame_id: session_frame_id,
+                    frames: silence,
+                },
+                &local_stats,
+            );
+
+            let delayed =
+                s24_delay.process(&silence, controls.s24_delay_ms());
+            let mut left_pcm = [0i16; LC3_FRAME_SAMPLES];
+            let mut right_pcm = [0i16; LC3_FRAME_SAMPLES];
+            for (index, frame) in delayed.iter().enumerate() {
+                left_pcm[index] = float_to_i16(frame[0]);
+                right_pcm[index] = float_to_i16(frame[1]);
+            }
+
+            let left = left_encoder
+                .encode_sdu(&left_pcm)
+                .map_err(|error| format!("left LC3 preroll encode failed: {error}"))?;
+            let right = right_encoder
+                .encode_sdu(&right_pcm)
+                .map_err(|error| format!("right LC3 preroll encode failed: {error}"))?;
+            let bytes = encode_lc3_stereo(
+                session_id,
+                sequence,
+                session_frame_id,
+                &left,
+                &right,
+            )
+            .map_err(|error| format!("UDP preroll encode failed: {error}"))?;
+
+            let sent = socket
+                .send(&bytes)
+                .map_err(|error| format!("UDP preroll send failed: {error}"))?;
+            if sent != bytes.len() {
+                return Err(format!(
+                    "partial UDP preroll send: {} of {} bytes",
+                    sent,
+                    bytes.len()
+                ));
+            }
+
+            sequence = sequence.saturating_add(1);
+            session_frame_id =
+                session_frame_id.saturating_add(BLOCK_FRAMES as u64);
+            packets_sent = packets_sent.saturating_add(1);
+            bytes_sent = bytes_sent.saturating_add(sent as u64);
+
+            next_deadline += block_period;
+            let now = Instant::now();
+            if next_deadline > now {
+                thread::sleep(next_deadline - now);
+            }
+        }
+
+        // Throw away anything captured during the last warmup interval. The
+        // next fresh Process Loopback block defines programme epoch 0, mapped
+        // onto the next aligned session packet boundary.
+        drain_source_queue(&source)?;
+        assembler = FrameAssembler::default();
+
+        println!(
+            "[dual][preroll] silence={}ms packets={} media_epoch_seq={} media_epoch_frame={}",
+            SESSION_PREROLL_MS,
+            SESSION_PREROLL_PACKETS,
+            sequence,
+            session_frame_id,
+        );
+
         while !controls.stop_requested() {
             match source.recv_timeout(Duration::from_millis(50)) {
             Ok(chunk) => {
@@ -546,7 +650,11 @@ fn run_dual_output(
                     chunk.discontinuity,
                 );
 
-                while let Some((first_frame_id, pcm)) = assembler.pop_block() {
+                while let Some((_source_first_frame_id, pcm)) = assembler.pop_block() {
+                    let first_frame_id = session_frame_id;
+                    session_frame_id =
+                        session_frame_id.saturating_add(BLOCK_FRAMES as u64);
+
                     push_local_block(
                         &local_tx,
                         LocalBlock {
