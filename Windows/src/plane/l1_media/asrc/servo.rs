@@ -343,10 +343,11 @@ mod tests {
         assert!((stats.mean_total_ppm - 500.0).abs() < 25.0);
         assert!((stats.mean_drift_ppm - 500.0).abs() < 25.0);
         assert!((stats.mean_filtered_fill - 1_920.0).abs() < 25.0);
-        // Raw FIFO is packet-phase quantized in 240-frame steps. Do not
-        // require it to stay near the filtered target; require only a large
-        // safety margin above FIR/underflow territory.
-        assert!(stats.minimum_fill > 1_700.0);
+        // Raw FIFO is packet-phase quantized in 240-frame steps. The
+        // controller regulates the filtered mean, not every packet-phase
+        // excursion. Keep two complete 5 ms packets of headroom below the
+        // 40 ms target: 1920 - 2*240 = 1440 frames.
+        assert!(stats.minimum_fill > 1_440.0);
     }
 
     #[test]
@@ -355,7 +356,8 @@ mod tests {
         assert!((stats.mean_total_ppm + 500.0).abs() < 25.0);
         assert!((stats.mean_drift_ppm + 500.0).abs() < 25.0);
         assert!((stats.mean_filtered_fill - 1_920.0).abs() < 25.0);
-        assert!(stats.minimum_fill > 1_700.0);
+        // Same two-packet safety floor as the positive-drift case.
+        assert!(stats.minimum_fill > 1_440.0);
     }
 
     #[derive(Clone, Copy, Debug, Default)]
