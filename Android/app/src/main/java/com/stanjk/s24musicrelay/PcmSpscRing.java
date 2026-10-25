@@ -29,7 +29,7 @@ final class PcmSpscRing {
         this.data = new short[capacityFrames * channels];
     }
 
-    int write(short[] source, int sourceOffsetSamples, int requestedFrames) {
+    synchronized int write(short[] source, int sourceOffsetSamples, int requestedFrames) {
         if (requestedFrames <= 0) return 0;
 
         final long localWrite = writeFrame;
@@ -71,7 +71,7 @@ final class PcmSpscRing {
         return framesToWrite;
     }
 
-    int read(short[] destination, int destinationOffsetSamples, int requestedFrames) {
+    synchronized int read(short[] destination, int destinationOffsetSamples, int requestedFrames) {
         if (requestedFrames <= 0) return 0;
 
         final long localRead = readFrame;
@@ -105,17 +105,24 @@ final class PcmSpscRing {
         return framesToRead;
     }
 
-    int availableFrames() {
+    synchronized int availableFrames() {
         final long available = writeFrame - readFrame;
         if (available <= 0) return 0;
         return (int) Math.min(available, capacityFrames);
     }
 
-    long highWaterFrames() {
+    synchronized void clear() {
+        // Session boundary only. Serializing read/write here keeps the
+        // producer reset from racing an in-flight render copy.
+        readFrame = writeFrame;
+        highWaterFrames = 0;
+    }
+
+    synchronized long highWaterFrames() {
         return highWaterFrames;
     }
 
-    int capacityFrames() {
+    synchronized int capacityFrames() {
         return capacityFrames;
     }
 }
