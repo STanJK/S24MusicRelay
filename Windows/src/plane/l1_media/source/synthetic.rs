@@ -23,6 +23,7 @@ const BLOCK_FRAMES: usize = 240;
 pub struct SyntheticProducer {
     stop: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU64>,
+    produced_frames: Arc<AtomicU64>,
     max_lateness_us: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
@@ -36,9 +37,11 @@ impl SyntheticProducer {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let dropped_frames = Arc::new(AtomicU64::new(0));
+        let produced_frames = Arc::new(AtomicU64::new(0));
         let max_lateness_us = Arc::new(AtomicU64::new(0));
         let stop_thread = Arc::clone(&stop);
         let dropped_thread = Arc::clone(&dropped_frames);
+        let produced_thread = Arc::clone(&produced_frames);
         let lateness_thread = Arc::clone(&max_lateness_us);
 
         let thread = thread::spawn(move || {
@@ -61,6 +64,11 @@ impl SyntheticProducer {
                         phase -= TAU;
                     }
                 }
+
+                produced_thread.fetch_add(
+                    BLOCK_FRAMES as u64,
+                    Ordering::Relaxed,
+                );
 
                 let written = ring.append(&block);
                 if written < BLOCK_FRAMES {
@@ -93,6 +101,7 @@ impl SyntheticProducer {
         Self {
             stop,
             dropped_frames,
+            produced_frames,
             max_lateness_us,
             thread: Some(thread),
         }
@@ -100,6 +109,10 @@ impl SyntheticProducer {
 
     pub fn dropped_frames(&self) -> u64 {
         self.dropped_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn produced_frames(&self) -> u64 {
+        self.produced_frames.load(Ordering::Relaxed)
     }
 
     pub fn max_lateness_us(&self) -> u64 {
