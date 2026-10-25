@@ -31,7 +31,7 @@ impl Default for ClockServoConfig {
     fn default() -> Self {
         Self {
             target_fill_frames: 1_920.0,
-            occupancy_filter_tau_seconds: 0.5,
+            occupancy_filter_tau_seconds: 5.0,
 
             // 3 ms at 48 kHz. Wide enough that a +/-500 ppm source can settle
             // under P-only acquisition, but narrow enough to reject the large
@@ -39,10 +39,10 @@ impl Default for ClockServoConfig {
             acquisition_error_frames: 144.0,
             acquisition_dwell_seconds: 1.0,
 
-            buffer_kp_ppm_per_frame: 5.0,
-            max_abs_buffer_ppm: 750.0,
+            buffer_kp_ppm_per_frame: 2.0,
+            max_abs_buffer_ppm: 500.0,
 
-            drift_ki_ppm_per_frame_second: 1.0,
+            drift_ki_ppm_per_frame_second: 0.1,
             max_abs_drift_ppm: 1_500.0,
 
             max_abs_total_ppm: 2_000.0,
@@ -280,6 +280,90 @@ mod tests {
         assert!((fill - 1_920.0).abs() < 15.0);
         assert!((out.drift_estimate_ppm + 500.0).abs() < 35.0);
         assert!((out.correction_ppm + 500.0).abs() < 35.0);
+    }
+
+    #[test]
+    fn packetized_plus_500_ppm_is_stable_on_average() {
+        let stats = simulate_packetized_clock_error(500.0, 180.0);
+        assert!((stats.mean_total_ppm - 500.0).abs() < 25.0);
+        assert!((stats.mean_drift_ppm - 500.0).abs() < 25.0);
+        assert!((stats.mean_filtered_fill - 1_920.0).abs() < 25.0);
+        assert!(stats.minimum_fill > 1_700.0);
+    }
+
+    #[test]
+    fn packetized_minus_500_ppm_is_stable_on_average() {
+        let stats = simulate_packetized_clock_error(-500.0, 180.0);
+        assert!((stats.mean_total_ppm + 500.0).abs() < 25.0);
+        assert!((stats.mean_drift_ppm + 500.0).abs() < 25.0);
+        assert!((stats.mean_filtered_fill - 1_920.0).abs() < 25.0);
+        assert!(stats.minimum_fill > 1_700.0);
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct PacketizedStats {
+        mean_total_ppm: f64,
+        mean_drift_ppm: f64,
+        mean_filtered_fill: f64,
+        minimum_fill: f64,
+    }
+
+    fn simulate_packetized_clock_error(
+        source_ppm: f64,
+        duration_seconds: f64,
+    ) -> PacketizedStats {
+        const OUTPUT_FRAMES: usize = 480;
+        const SOURCE_PACKET_FRAMES: f64 = 240.0;
+        const SAMPLE_RATE_HZ: f64 = 48_000.0;
+
+        let mut servo = ClockServo::reference();
+        let mut fill = servo.target_fill_frames() as f64;
+        let mut source_phase = 0.0f64;
+        let mut step = 1.0;
+
+        let iterations =
+            (duration_seconds * SAMPLE_RATE_HZ / OUTPUT_FRAMES as f64) as usize;
+        let averaging_start = iterations.saturating_sub(6_000);
+
+        let mut total_sum = 0.0;
+        let mut drift_sum = 0.0;
+        let mut filtered_sum = 0.0;
+        let mut samples = 0usize;
+        let mut minimum_fill = f64::MAX;
+
+        for iteration in 0..iterations {
+            source_phase += OUTPUT_FRAMES as f64
+                * (1.0 + source_ppm * 1.0e-6);
+
+            let packet_count =
+                (source_phase / SOURCE_PACKET_FRAMES).floor();
+            source_phase -= packet_count * SOURCE_PACKET_FRAMES;
+            fill += packet_count * SOURCE_PACKET_FRAMES;
+
+            fill -= OUTPUT_FRAMES as f64 * step;
+            minimum_fill = minimum_fill.min(fill);
+
+            let out = servo.update_after_render(
+                fill.round().max(0.0) as usize,
+                OUTPUT_FRAMES,
+                SAMPLE_RATE_HZ,
+            );
+            step = out.step;
+
+            if iteration >= averaging_start {
+                total_sum += out.correction_ppm;
+                drift_sum += out.drift_estimate_ppm;
+                filtered_sum += out.filtered_fill_frames;
+                samples += 1;
+            }
+        }
+
+        PacketizedStats {
+            mean_total_ppm: total_sum / samples as f64,
+            mean_drift_ppm: drift_sum / samples as f64,
+            mean_filtered_fill: filtered_sum / samples as f64,
+            minimum_fill,
+        }
     }
 
     fn simulate_constant_clock_error(
