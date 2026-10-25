@@ -556,6 +556,9 @@ pub fn measure_chirp_alignment(
         .into());
     }
 
+    let valid_realtek_chirps = realtek_offsets.len();
+    let valid_s24_chirps = s24_offsets.len();
+
     let realtek_median_frames =
         median(realtek_offsets).expect("validated nonempty");
     let s24_median_frames =
@@ -602,8 +605,8 @@ pub fn measure_chirp_alignment(
         delta_s24_minus_realtek_ms: delta_ms,
         recommended_realtek_delay_ms,
         recommended_s24_delay_ms,
-        valid_realtek_chirps: realtek_offsets.len(),
-        valid_s24_chirps: s24_offsets.len(),
+        valid_realtek_chirps,
+        valid_s24_chirps,
     })
 }
 
