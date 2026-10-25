@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 public final class MainActivity extends Activity implements CaptureService.MeterListener {
@@ -18,6 +19,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
 
     private TextView status;
     private TextView meter;
+    private TextView delayLabel;
     private MediaProjectionManager projectionManager;
 
     @Override
@@ -34,6 +36,30 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         status.setText("Idle");
         status.setTextSize(20);
 
+        delayLabel = new TextView(this);
+        delayLabel.setPadding(0, 24, 0, 8);
+        delayLabel.setTextSize(16);
+
+        SeekBar delay = new SeekBar(this);
+        delay.setMax(500);
+        delay.setProgress(CaptureService.getConfiguredDelayMs());
+        updateDelayLabel(delay.getProgress());
+        delay.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                CaptureService.setConfiguredDelayMs(progress);
+                updateDelayLabel(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+
         meter = new TextView(this);
         meter.setText("PCM: --");
         meter.setTextSize(16);
@@ -41,7 +67,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         meter.setTextIsSelectable(true);
 
         Button start = new Button(this);
-        start.setText("Start global capture");
+        start.setText("Start capture + local rerender");
         start.setOnClickListener(v -> beginCapture());
 
         Button stop = new Button(this);
@@ -52,10 +78,16 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         });
 
         root.addView(status);
+        root.addView(delayLabel);
+        root.addView(delay);
         root.addView(meter);
         root.addView(start);
         root.addView(stop);
         setContentView(root);
+    }
+
+    private void updateDelayLabel(int delayMs) {
+        delayLabel.setText("Local presentation delay: " + delayMs + " ms");
     }
 
     private void beginCapture() {
@@ -92,7 +124,7 @@ public final class MainActivity extends Activity implements CaptureService.Meter
         svc.putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode);
         svc.putExtra(CaptureService.EXTRA_RESULT_DATA, data);
         startForegroundService(svc);
-        status.setText("Starting capture…");
+        status.setText("Starting capture + local rerender…");
     }
 
     @Override
@@ -110,10 +142,32 @@ public final class MainActivity extends Activity implements CaptureService.Meter
     @Override
     public void onMeter(CaptureService.MeterSnapshot snapshot) {
         runOnUiThread(() -> {
-            status.setText("Capturing 48 kHz / PCM16 / stereo — self UID excluded");
+            status.setText("48 kHz / PCM16 / stereo — self UID excluded");
             meter.setText(String.format(
-                    "frames: %,d\npeak: %.6f\nRMS:  %.6f\nPCM[0..7]: %s",
-                    snapshot.frames, snapshot.peak, snapshot.rms, snapshot.samples));
+                    "Capture\n" +
+                            "  frames: %,d\n" +
+                            "  peak: %.6f\n" +
+                            "  RMS:  %.6f\n" +
+                            "  PCM[0..7]: %s\n\n" +
+                            "Transport ring\n" +
+                            "  occupancy: %d frames / %.2f ms\n" +
+                            "  high-water: %d frames\n" +
+                            "  dropped: %,d frames\n\n" +
+                            "Presentation\n" +
+                            "  configured delay: %d ms\n" +
+                            "  rendered: %,d frames\n" +
+                            "  underflow: %,d frames",
+                    snapshot.capturedFrames,
+                    snapshot.peak,
+                    snapshot.rms,
+                    snapshot.samples,
+                    snapshot.ringFrames,
+                    snapshot.ringMs,
+                    snapshot.ringHighWaterFrames,
+                    snapshot.droppedFrames,
+                    snapshot.configuredDelayMs,
+                    snapshot.renderedFrames,
+                    snapshot.underflowFrames));
         });
     }
 
