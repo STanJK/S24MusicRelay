@@ -347,10 +347,9 @@ public final class NetworkSpeakerService extends Service {
         AudioTrack localTrack = track;
         track = null;
         if (localTrack != null) {
+            // Pause first to unblock a blocking writer, but keep the native
+            // AudioTrack alive until the render thread has actually exited.
             try { localTrack.pause(); } catch (Throwable ignored) {}
-            try { localTrack.flush(); } catch (Throwable ignored) {}
-            try { localTrack.stop(); } catch (Throwable ignored) {}
-            localTrack.release();
         }
 
         Thread localThread = renderThread;
@@ -362,6 +361,12 @@ public final class NetworkSpeakerService extends Service {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+
+        if (localTrack != null) {
+            try { localTrack.flush(); } catch (Throwable ignored) {}
+            try { localTrack.stop(); } catch (Throwable ignored) {}
+            localTrack.release();
         }
 
         ring = null;
