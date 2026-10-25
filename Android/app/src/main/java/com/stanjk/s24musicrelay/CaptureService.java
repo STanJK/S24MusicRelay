@@ -26,6 +26,8 @@ public final class CaptureService extends Service {
     public static final String ACTION_START = "com.stanjk.s24musicrelay.START";
     public static final String EXTRA_RESULT_CODE = "resultCode";
     public static final String EXTRA_RESULT_DATA = "resultData";
+    public static final String EXTRA_UDP_HOST = "udpHost";
+    public static final String EXTRA_UDP_PORT = "udpPort";
 
     private static final String CHANNEL_ID = "capture";
     private static final int NOTIFICATION_ID = 24;
@@ -55,6 +57,10 @@ public final class CaptureService extends Service {
         public final long underflowFrames;
         public final long droppedFrames;
         public final int configuredDelayMs;
+        public final long udpPacketsSent;
+        public final long udpLastSequence;
+        public final long udpLastFirstFrame;
+        public final long udpQueueDroppedFrames;
 
         MeterSnapshot(
                 long capturedFrames,
@@ -67,7 +73,11 @@ public final class CaptureService extends Service {
                 long ringHighWaterFrames,
                 long underflowFrames,
                 long droppedFrames,
-                int configuredDelayMs) {
+                int configuredDelayMs,
+                long udpPacketsSent,
+                long udpLastSequence,
+                long udpLastFirstFrame,
+                long udpQueueDroppedFrames) {
             this.capturedFrames = capturedFrames;
             this.renderedFrames = renderedFrames;
             this.peak = peak;
@@ -79,6 +89,10 @@ public final class CaptureService extends Service {
             this.underflowFrames = underflowFrames;
             this.droppedFrames = droppedFrames;
             this.configuredDelayMs = configuredDelayMs;
+            this.udpPacketsSent = udpPacketsSent;
+            this.udpLastSequence = udpLastSequence;
+            this.udpLastFirstFrame = udpLastFirstFrame;
+            this.udpQueueDroppedFrames = udpQueueDroppedFrames;
         }
     }
 
@@ -108,6 +122,9 @@ public final class CaptureService extends Service {
     private MediaProjection mediaProjection;
     private PcmSpscRing transportRing;
     private FixedDelayLine delayLine;
+    private UdpPcmSender udpSender;
+    private String pendingUdpHost;
+    private int pendingUdpPort = UdpPcmSender.DEFAULT_PORT;
 
     @Override
     public void onCreate() {
@@ -138,6 +155,11 @@ public final class CaptureService extends Service {
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
+
+        pendingUdpHost = intent.getStringExtra(EXTRA_UDP_HOST);
+        pendingUdpPort = intent.getIntExtra(
+                EXTRA_UDP_PORT,
+                UdpPcmSender.DEFAULT_PORT);
 
         int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
         Intent resultData;
@@ -245,6 +267,23 @@ public final class CaptureService extends Service {
         transportRing = new PcmSpscRing(TRANSPORT_RING_FRAMES, CHANNELS);
         delayLine = new FixedDelayLine(msToFrames(MAX_DELAY_MS), CHANNELS);
 
+        if (pendingUdpHost != null && !pendingUdpHost.isBlank()) {
+            try {
+                udpSender = new UdpPcmSender(
+                        pendingUdpHost,
+                        pendingUdpPort,
+                        SAMPLE_RATE,
+                        CHANNELS);
+                udpSender.start();
+            } catch (Throwable t) {
+                fail("UDP disabled: "
+                        + t.getClass().getSimpleName()
+                        + ": "
+                        + t.getMessage());
+                udpSender = null;
+            }
+        }
+
         renderedFrames = 0;
         renderUnderflowFrames = 0;
         captureDroppedFrames = 0;
@@ -284,7 +323,13 @@ public final class CaptureService extends Service {
             if (samplesRead == 0) continue;
 
             int framesRead = samplesRead / CHANNELS;
+            long firstFrameId = capturedFrames;
             capturedFrames += framesRead;
+
+            UdpPcmSender sender = udpSender;
+            if (sender != null) {
+                sender.offer(pcm, samplesRead, firstFrameId);
+            }
 
             int framesWritten = ring.write(pcm, 0, framesRead);
             if (framesWritten < framesRead) {
@@ -324,7 +369,11 @@ public final class CaptureService extends Service {
                     ring.highWaterFrames(),
                     renderUnderflowFrames,
                     captureDroppedFrames,
-                    configuredDelayMs);
+                    configuredDelayMs,
+                    udpSender == null ? 0 : udpSender.packetsSent(),
+                    udpSender == null ? -1 : udpSender.lastSequence(),
+                    udpSender == null ? -1 : udpSender.lastFirstFrameId(),
+                    udpSender == null ? 0 : udpSender.queueDroppedFrames());
 
             MeterListener listener = meterListener;
             if (listener != null) listener.onMeter(snapshot);
@@ -436,6 +485,12 @@ public final class CaptureService extends Service {
         renderThread = null;
         transportRing = null;
         delayLine = null;
+
+        UdpPcmSender sender = udpSender;
+        udpSender = null;
+        if (sender != null) {
+            sender.close();
+        }
 
         MediaProjection projection = mediaProjection;
         mediaProjection = null;
