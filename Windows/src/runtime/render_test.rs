@@ -85,6 +85,9 @@ pub fn run_render_test(
     let mut last_report = Instant::now();
     let started = Instant::now();
 
+    let source_baseline = producer.produced_frames();
+    let output_baseline = total_output;
+
     if initial_wasapi_frames > 0 {
         let mut frames = vec![[0.0f32; 2]; initial_wasapi_frames];
         let result =
@@ -130,10 +133,23 @@ pub fn run_render_test(
         sink.write_float_stereo(&frames)?;
 
         if last_report.elapsed() >= Duration::from_secs(2) {
+            let source_progress =
+                producer.produced_frames().saturating_sub(source_baseline);
+            let output_progress =
+                total_output.saturating_sub(output_baseline);
+            let observed_ratio_ppm =
+                if output_progress > 0 {
+                    (source_progress as f64 / output_progress as f64 - 1.0)
+                        * 1.0e6
+                } else {
+                    0.0
+                };
+
             println!(
                 "[asrc] raw={} filtered={:.1} err={:+.1} step={:.9} \
-                 total={:+.2}ppm drift={:+.2}ppm buffer={:+.2}ppm acquiring={} stable={:.2}s \
-                 underflow={} retired={} producer_drop={} producer_max_late_us={}",
+                 total={:+.2}ppm drift={:+.2}ppm buffer={:+.2}ppm observed={:+.1}ppm \
+                 acquiring={} stable={:.2}s underflow={} retired={} producer_drop={} \
+                 producer_max_late_us={}",
                 servo_out.raw_fill_frames,
                 servo_out.filtered_fill_frames,
                 servo_out.fill_error_frames,
@@ -141,6 +157,7 @@ pub fn run_render_test(
                 servo_out.correction_ppm,
                 servo_out.drift_estimate_ppm,
                 servo_out.buffer_correction_ppm,
+                observed_ratio_ppm,
                 servo_out.acquiring,
                 servo_out.acquisition_stable_seconds,
                 total_underflow,
