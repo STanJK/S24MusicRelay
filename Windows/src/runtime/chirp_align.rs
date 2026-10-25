@@ -56,6 +56,17 @@ pub struct ChirpAlignConfig {
     pub mic_device_substring: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ChirpAlignment {
+    pub realtek_common_offset_ms: f64,
+    pub s24_common_offset_ms: f64,
+    pub delta_s24_minus_realtek_ms: f64,
+    pub recommended_realtek_delay_ms: f64,
+    pub recommended_s24_delay_ms: f64,
+    pub valid_realtek_chirps: usize,
+    pub valid_s24_chirps: usize,
+}
+
 #[derive(Clone)]
 struct LocalBlock {
     frames: [[f32; 2]; BLOCK_FRAMES],
@@ -352,9 +363,9 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn run_chirp_align(
+pub fn measure_chirp_alignment(
     config: ChirpAlignConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ChirpAlignment, Box<dyn std::error::Error>> {
     let chirp = generate_reference_chirp();
 
     let (local_tx, local_rx) =
@@ -570,24 +581,49 @@ pub fn run_chirp_align(
     println!("  S24 common-offset median     : {:8.2} ms", s24_median_ms);
     println!("  S24 - Realtek  : {:+8.2} ms", delta_ms);
 
-    if delta_ms >= 0.0 {
-        println!(
-            "  Align           : Realtek delay +{:.2} ms, S24 delay +0 ms",
-            delta_ms,
-        );
-    } else {
-        println!(
-            "  Align           : Realtek delay +0 ms, S24 delay +{:.2} ms",
-            -delta_ms,
-        );
-    }
+    let (recommended_realtek_delay_ms, recommended_s24_delay_ms) =
+        if delta_ms >= 0.0 {
+            println!(
+                "  Align           : Realtek delay +{:.2} ms, S24 delay +0 ms",
+                delta_ms,
+            );
+            (delta_ms, 0.0)
+        } else {
+            println!(
+                "  Align           : Realtek delay +0 ms, S24 delay +{:.2} ms",
+                -delta_ms,
+            );
+            (0.0, -delta_ms)
+        };
 
-    Ok(())
+    Ok(ChirpAlignment {
+        realtek_common_offset_ms: realtek_median_ms,
+        s24_common_offset_ms: s24_median_ms,
+        delta_s24_minus_realtek_ms: delta_ms,
+        recommended_realtek_delay_ms,
+        recommended_s24_delay_ms,
+        valid_realtek_chirps: realtek_offsets.len(),
+        valid_s24_chirps: s24_offsets.len(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub fn run_chirp_align(
+    config: ChirpAlignConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    measure_chirp_alignment(config).map(|_| ())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn measure_chirp_alignment(
+    _config: ChirpAlignConfig,
+) -> Result<ChirpAlignment, Box<dyn std::error::Error>> {
+    Err("chirp-align is only available on Windows".into())
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn run_chirp_align(
-    _config: ChirpAlignConfig,
+    config: ChirpAlignConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    Err("chirp-align is only available on Windows".into())
+    measure_chirp_alignment(config).map(|_| ())
 }
