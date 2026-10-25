@@ -58,7 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sacrificial_substring,
                 local_device_substring,
             })
-            .map_err(Into::into)
+            .map_err(|error| -> Box<dyn std::error::Error> {
+                error.into()
+            })
         }
 
         Some("udp-send-live") => {
