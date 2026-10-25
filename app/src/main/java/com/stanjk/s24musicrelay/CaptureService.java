@@ -125,7 +125,7 @@ public final class CaptureService extends Service {
                 stopCapture();
                 stopSelf();
             }
-        }, null);
+        }, new Handler(Looper.getMainLooper()));
 
         AudioPlaybackCaptureConfiguration config =
                 new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
@@ -170,7 +170,7 @@ public final class CaptureService extends Service {
         long lastPublishNs = 0;
 
         while (running) {
-            int n = audioRecord.read(pcm, 0, pcm.length, AudioRecord.READ_BLOCKING);
+            int n = record.read(pcm, 0, pcm.length, AudioRecord.READ_BLOCKING);
             if (n < 0) {
                 fail("AudioRecord.read = " + n);
                 break;
