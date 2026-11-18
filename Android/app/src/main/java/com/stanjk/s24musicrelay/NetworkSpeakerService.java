@@ -13,6 +13,7 @@ import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
@@ -107,6 +108,7 @@ public final class NetworkSpeakerService extends Service {
     private AudioTrack track;
     private Thread renderThread;
     private int receiveBufferBytes;
+    private PowerManager.WakeLock cpuWakeLock;
 
     @Override
     public void onCreate() {
@@ -153,6 +155,18 @@ public final class NetworkSpeakerService extends Service {
     }
 
     private void startNetworkSpeaker() throws Exception {
+        PowerManager powerManager = getSystemService(PowerManager.class);
+        if (powerManager == null) {
+            throw new IllegalStateException("PowerManager unavailable");
+        }
+        PowerManager.WakeLock wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "S24MusicRelay:NetworkSpeaker");
+        wakeLock.setReferenceCounted(false);
+        wakeLock.acquire();
+        cpuWakeLock = wakeLock;
+        Log.i(TAG, "[net-speaker] partial wakelock acquired");
+
         AudioManager manager = getSystemService(AudioManager.class);
         AudioDeviceInfo speaker = null;
         if (manager != null) {
@@ -520,6 +534,16 @@ public final class NetworkSpeakerService extends Service {
 
     private synchronized void stopNetworkSpeaker() {
         running = false;
+
+        PowerManager.WakeLock localWakeLock = cpuWakeLock;
+        cpuWakeLock = null;
+        if (localWakeLock != null && localWakeLock.isHeld()) {
+            try {
+                localWakeLock.release();
+                Log.i(TAG, "[net-speaker] partial wakelock released");
+            } catch (Throwable ignored) {
+            }
+        }
 
         UdpPcmReceiver localReceiver = receiver;
         receiver = null;
